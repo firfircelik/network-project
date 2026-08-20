@@ -14,8 +14,6 @@ import (
 const (
 	// TypeRegister tells the coordinator a peer exists (agent -> coordinator).
 	TypeRegister = "register"
-	// TypeHello assigns (or echoes) the agent's ID (coordinator -> agent).
-	TypeHello = "hello"
 	// TypePeerList carries the full set of known peers (coordinator -> agent).
 	TypePeerList = "peer_list"
 	// TypeError carries a control-plane error.

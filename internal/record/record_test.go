@@ -128,3 +128,14 @@ func TestReadFrameTruncatedHeader(t *testing.T) {
 		t.Fatalf("ReadFrame(2 bytes) error = %v, want io.ErrUnexpectedEOF", err)
 	}
 }
+
+// TestFrameOversizePanics guards the uint16 length field: an 8 KiB+ payload
+// cannot be encoded, so Frame must panic instead of silently wrapping.
+func TestFrameOversizePanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("Frame(big payload) did not panic")
+		}
+	}()
+	Frame(TypeData, make([]byte, maxPayloadLen+1))
+}

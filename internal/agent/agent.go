@@ -53,14 +53,18 @@ type Agent struct {
 	ctrl       net.Conn
 	ctrlConn   *control.Conn
 	ctrlCancel context.CancelFunc
+	ctrlMu     sync.Mutex // guards ctrl/ctrlConn/ctrlCancel (re-register vs reader loop)
 
-	mu    sync.Mutex
-	peers map[string]*peer.Peer
+	mu         sync.Mutex
+	peers      map[string]*peer.Peer
+	peerCancel map[string]context.CancelFunc
+	baseCtx    context.Context // agent-wide context peers are derived from
 
 	bridge *tunBridge // optional: TUN device bridge (Faz 4)
 
-	pingMu  sync.Mutex
-	pingOut map[uint64]chan time.Time
+	pingMu    sync.Mutex
+	pingOut   map[uint64]chan time.Time
+	closeOnce sync.Once
 }
 
 // New loads (or creates) the keypair and prepares the data socket.
@@ -74,12 +78,13 @@ func New(cfg Config) (*Agent, error) {
 		return nil, fmt.Errorf("bind data socket: %w", err)
 	}
 	a := &Agent{
-		cfg:     cfg,
-		log:     slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})).With("name", cfg.Name),
-		kp:      kp,
-		conn:    conn.(*net.UDPConn),
-		peers:   make(map[string]*peer.Peer),
-		pingOut: make(map[uint64]chan time.Time),
+		cfg:        cfg,
+		log:        slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})).With("name", cfg.Name),
+		kp:         kp,
+		conn:       conn.(*net.UDPConn),
+		peers:      make(map[string]*peer.Peer),
+		peerCancel: make(map[string]context.CancelFunc),
+		pingOut:    make(map[uint64]chan time.Time),
 	}
 	if cfg.NatDoor != "" {
 		a.door, err = net.ResolveUDPAddr("udp", cfg.NatDoor)
@@ -176,19 +181,21 @@ func txidMatches(b []byte, txid [12]byte) bool {
 // session and registers this agent. It returns the initial peer list, then
 // streams subsequent peer_list updates to wait.
 func (a *Agent) register(ctx context.Context) error {
+	coordPub, err := noisework.ParsePublicKeyHex(a.cfg.CoordKey)
+	if err != nil {
+		return fmt.Errorf("invalid coordinator public key: %w", err)
+	}
+	a.ctrlMu.Lock()
 	if a.ctrl != nil {
 		a.ctrl.Close()
 		if a.ctrlCancel != nil {
 			a.ctrlCancel()
 		}
 	}
-	coordPub, err := noisework.ParsePublicKeyHex(a.cfg.CoordKey)
-	if err != nil {
-		return fmt.Errorf("invalid coordinator public key: %w", err)
-	}
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "tcp", a.cfg.Coordinator)
 	if err != nil {
+		a.ctrlMu.Unlock()
 		return fmt.Errorf("dial coordinator: %w", err)
 	}
 	a.ctrl = conn
@@ -197,10 +204,14 @@ func (a *Agent) register(ctx context.Context) error {
 
 	ctrl, err := control.Initiate(conn, a.kp, coordPub)
 	if err != nil {
+		a.ctrlCancel = nil
+		a.ctrl = nil
+		a.ctrlMu.Unlock()
 		conn.Close()
 		return fmt.Errorf("control handshake: %w", err)
 	}
 	a.ctrlConn = ctrl
+	a.ctrlMu.Unlock()
 
 	msg := protocol.Message{
 		Type:      protocol.TypeRegister,
@@ -228,7 +239,10 @@ func (a *Agent) publicEndpoints() []string {
 }
 
 func (a *Agent) ctrlReaderLoop(ctx context.Context, ctrl *control.Conn) {
-	defer a.ctrl.Close()
+	// Close the *local* control connection: on re-registration the caller
+	// installs a brand-new connection, and closing the shared a.ctrl field
+	// here would tear down the session that just replaced this one.
+	defer ctrl.Close()
 	for {
 		plain, err := ctrl.ReadMsg()
 		if err != nil {
@@ -251,6 +265,8 @@ func (a *Agent) ctrlReaderLoop(ctx context.Context, ctrl *control.Conn) {
 }
 
 // applyPeers adds newly discovered peers and prunes peers that disappeared.
+// Re-registrations also refresh a known peer's direct endpoint so a NAT remap
+// or restart is picked up without a new connection.
 func (a *Agent) applyPeers(infos []protocol.PeerInfo) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -261,7 +277,22 @@ func (a *Agent) applyPeers(infos []protocol.PeerInfo) {
 			continue
 		}
 		seen[info.ID] = true
-		if _, ok := a.peers[info.ID]; ok {
+		var directEP *net.UDPAddr
+		if len(info.Endpoints) > 0 {
+			ep, err := net.ResolveUDPAddr("udp", info.Endpoints[0])
+			if err != nil {
+				a.log.Warn("bad peer endpoint", "peer", info.ID, "err", err)
+			} else {
+				directEP = ep
+			}
+		}
+		if existing, ok := a.peers[info.ID]; ok {
+			// The peer is already tracked: refresh its endpoint mapping and
+			// carry on (the session survives across endpoint changes; the next
+			// handshake will target the new address).
+			if directEP != nil {
+				existing.SetDirectEP(directEP)
+			}
 			continue
 		}
 		pub, err := noisework.ParsePublicKeyHex(info.PubKey)
@@ -269,17 +300,10 @@ func (a *Agent) applyPeers(infos []protocol.PeerInfo) {
 			a.log.Warn("bad peer pubkey", "peer", info.ID, "err", err)
 			continue
 		}
-		var directEP *net.UDPAddr
-		if len(info.Endpoints) > 0 {
-			directEP, err = net.ResolveUDPAddr("udp", info.Endpoints[0])
-			if err != nil {
-				a.log.Warn("bad peer endpoint", "peer", info.ID, "err", err)
-				continue
-			}
-		}
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(a.baseCtx)
 		np := peer.New(a.cfg.Name, info.ID, pub, directEP, a.kp, a)
 		a.peers[info.ID] = np
+		a.peerCancel[info.ID] = cancel
 		if a.bridge != nil {
 			a.bridge.setPeerSink(info.ID, np)
 		}
@@ -293,6 +317,10 @@ func (a *Agent) applyPeers(infos []protocol.PeerInfo) {
 		if !seen[id] {
 			if a.bridge != nil {
 				a.bridge.setPeerSink(id, nil)
+			}
+			if cancel, ok := a.peerCancel[id]; ok {
+				cancel()
+				delete(a.peerCancel, id)
 			}
 			p.Close()
 			delete(a.peers, id)
@@ -332,10 +360,13 @@ func (a *Agent) handlePeerPayload(p *peer.Peer, payload []byte) {
 	}
 	if a.bridge != nil {
 		// TUN mode: payloads are plain IP packets unless they are the
-		// diagnostic ping/pong messages.
-		if m, ok := decodePingMsg(payload); ok {
-			a.dispatchPing(p, m)
-			return
+		// diagnostic ping/pong messages (cheap first-byte check avoids a JSON
+		// parse on every packet).
+		if len(payload) > 0 && payload[0] == '{' {
+			if m, ok := decodePingMsg(payload); ok {
+				a.dispatchPing(p, m)
+				return
+			}
 		}
 		if err := a.bridge.inbound(payload); err != nil {
 			a.log.Warn("tun write failed", "peer", p.ID, "bytes", len(payload), "err", err)
@@ -371,6 +402,14 @@ func (a *Agent) dispatchPing(p *peer.Peer, m *pingMsg) {
 	}
 }
 
+// dropPing removes a pending ping's waiter so a timed-out or cancelled ping
+// cannot leak pingOut entries in a long-running daemon.
+func (a *Agent) dropPing(seq uint64) {
+	a.pingMu.Lock()
+	delete(a.pingOut, seq)
+	a.pingMu.Unlock()
+}
+
 // PingResult summarises a ping run against a peer.
 type PingResult struct {
 	Peer        string
@@ -399,6 +438,7 @@ func (a *Agent) Ping(ctx context.Context, target string, count int, interval tim
 
 	res := &PingResult{Peer: target, Count: count, Established: true}
 	var total time.Duration
+pingLoop:
 	for i := 0; i < count; i++ {
 		seq := uint64(time.Now().UnixNano())
 		ts := time.Now().UnixNano()
@@ -414,6 +454,7 @@ func (a *Agent) Ping(ctx context.Context, target string, count int, interval tim
 
 		select {
 		case <-ctx.Done():
+			a.dropPing(seq)
 			return res, ctx.Err()
 		case got := <-done:
 			rtt := got.Sub(time.Unix(0, ts))
@@ -421,12 +462,14 @@ func (a *Agent) Ping(ctx context.Context, target string, count int, interval tim
 			res.Received++
 			a.log.Info("ping result", "peer", target, "seq", i, "rtt", rtt, "path", p.Path())
 		case <-time.After(time.Until(deadline)):
+			// a lost ping: forget its waiter so the map cannot grow forever
+			a.dropPing(seq)
 			a.log.Warn("ping lost", "peer", target, "seq", i)
 		}
 		if interval > 0 && i+1 < count {
 			select {
 			case <-ctx.Done():
-				break
+				break pingLoop
 			case <-time.After(interval):
 			}
 		}
@@ -472,6 +515,37 @@ func (a *Agent) attachBridge(b *tunBridge) {
 	a.log.Info("tun device open", "dev", b.dev.Name())
 }
 
+// Close releases every resource owned by the agent: the data socket, the
+// control connection(s), the TUN bridge device and all peer goroutines. It is
+// idempotent and safe to call from Run's shutdown path and from tests.
+func (a *Agent) Close() {
+	a.closeOnce.Do(func() {
+		if a.conn != nil {
+			a.conn.Close()
+		}
+		a.ctrlMu.Lock()
+		if a.ctrlCancel != nil {
+			a.ctrlCancel()
+		}
+		if a.ctrl != nil {
+			a.ctrl.Close()
+		}
+		a.ctrlMu.Unlock()
+		if a.bridge != nil {
+			a.bridge.Close()
+		}
+		a.mu.Lock()
+		for id, cancel := range a.peerCancel {
+			cancel()
+			delete(a.peerCancel, id)
+		}
+		for _, p := range a.peers {
+			p.Close()
+		}
+		a.mu.Unlock()
+	})
+}
+
 // Run starts the agent daemon: registration + data-plane receive loop and
 // (when configured) the TUN bridge.
 func (a *Agent) Run(ctx context.Context) error {
@@ -500,10 +574,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			a.ctrl.Close()
-			if a.ctrlCancel != nil {
-				a.ctrlCancel()
-			}
+			a.Close()
 			return nil
 		case <-ticker.C:
 			if err := a.register(ctx); err != nil {
@@ -515,6 +586,7 @@ func (a *Agent) Run(ctx context.Context) error {
 
 // setup binds keys, socket, resolves the public endpoint and registers.
 func (a *Agent) setup(ctx context.Context) error {
+	a.baseCtx = ctx
 	a.log.Info("public key", "hex", a.kp.PublicHex())
 	pub, err := a.resolvePublicEndpoint(ctx)
 	if err != nil {

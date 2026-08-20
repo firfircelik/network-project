@@ -57,6 +57,14 @@ type Config struct {
 	// name per second so one name cannot balloon outgoing bandwidth
 	// (anti-flood). Defaults to 256 KiB/s; a negative value disables it.
 	NameQuotaBytes int
+
+	// GlobalMaxPPS caps inbound datagrams per second across ALL sources and
+	// GlobalMaxBytesPS caps their payload bytes. Per-source budgets cannot
+	// bound a flood of many distinct (spoofed) sources, so these bound the
+	// total work a relay performs. Zero caps default to 5000 pps and 8 MiB/s;
+	// a negative value disables the respective budget.
+	GlobalMaxPPS     int
+	GlobalMaxBytesPS int
 }
 
 // fillDefaults installs the production-safe budgets where a zero value was
@@ -73,6 +81,12 @@ func (c *Config) fillDefaults() {
 	}
 	if c.NameQuotaBytes == 0 {
 		c.NameQuotaBytes = 256 << 10
+	}
+	if c.GlobalMaxPPS == 0 {
+		c.GlobalMaxPPS = 5000
+	}
+	if c.GlobalMaxBytesPS == 0 {
+		c.GlobalMaxBytesPS = 8 << 20
 	}
 }
 
@@ -91,17 +105,19 @@ type counter struct {
 
 // Server is a relay server.
 type Server struct {
-	conn      *net.UDPConn
-	cfg       Config
-	mu        sync.Mutex
-	pins      map[string]*pin     // name -> pinned endpoint (G2)
-	srcRate   map[string]*counter // per-source datagram budget
-	srcBytes  map[string]*counter // per-source byte budget
-	nameBytes map[string]*counter // per-destination-name byte quota
-	lastSweep time.Time
-	stats     Stats
-	closeOnce sync.Once
-	closeCh   chan struct{}
+	conn        *net.UDPConn
+	cfg         Config
+	mu          sync.Mutex
+	pins        map[string]*pin     // name -> pinned endpoint (G2)
+	srcRate     map[string]*counter // per-source datagram budget
+	srcBytes    map[string]*counter // per-source byte budget
+	nameBytes   map[string]*counter // per-destination-name byte quota
+	globalRate  counter             // across-all-sources datagram budget
+	globalBytes counter             // across-all-sources byte budget
+	lastSweep   time.Time
+	stats       Stats
+	closeOnce   sync.Once
+	closeCh     chan struct{}
 }
 
 // Stats reports relay activity counters.
@@ -269,6 +285,17 @@ func (s *Server) handlePacket(pkt []byte, src *net.UDPAddr) {
 	// maps, so they run under one lock; the socket write happens after it is
 	// released.
 	s.mu.Lock()
+	// Age out stale entries on EVERY path (drops included): if the sweep only
+	// ran on the forwarding path, a flood of dropped packets would still grow
+	// the pins/srcRate maps unboundedly.
+	s.maybeSweep(now)
+	// Bound total relay work across all sources before any per-source logic.
+	if !takeGlobal(&s.globalRate, 1, s.cfg.GlobalMaxPPS, now) ||
+		!takeGlobal(&s.globalBytes, len(pkt), s.cfg.GlobalMaxBytesPS, now) {
+		s.stats.RateLimited++
+		s.mu.Unlock()
+		return
+	}
 	if p := s.pins[srcID]; p != nil {
 		if addrEqual(p.addr, addr) {
 			p.lastSeen = now
@@ -307,7 +334,6 @@ func (s *Server) handlePacket(pkt []byte, src *net.UDPAddr) {
 		s.mu.Unlock()
 		return
 	}
-	s.maybeSweep(now)
 	dstAddr := cloneAddr(dst.addr)
 	s.mu.Unlock()
 
@@ -332,7 +358,37 @@ func (s *Server) take(m *map[string]*counter, key string, amount, cap int, now t
 	}
 	c := (*m)[key]
 	if c == nil || now.Sub(c.start) >= time.Second {
-		(*m)[key] = &counter{start: now, count: amount}
+		// Fresh window: bank only the effective cost so a single oversized
+		// (and rejected) datagram does not pre-charge the whole next second
+		// beyond the cap itself.
+		eff := amount
+		if eff > cap {
+			eff = cap
+		}
+		(*m)[key] = &counter{start: now, count: eff}
+		return amount <= cap
+	}
+	if c.count+amount > cap {
+		return false
+	}
+	c.count += amount
+	return true
+}
+
+// takeGlobal draws amount from a single budget shared by every source (unlike
+// take, the counter lives in the Server, not in a per-key map). cap <= 0
+// disables the budget.
+func takeGlobal(c *counter, amount, cap int, now time.Time) bool {
+	if cap <= 0 {
+		return true
+	}
+	if now.Sub(c.start) >= time.Second {
+		eff := amount
+		if eff > cap {
+			eff = cap
+		}
+		c.start = now
+		c.count = eff
 		return amount <= cap
 	}
 	if c.count+amount > cap {

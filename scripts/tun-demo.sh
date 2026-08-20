@@ -16,14 +16,30 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/bin"
-TMP="$(mktemp -d)"
-KEYA="$TMP/key.a"
-KEYB="$TMP/key.b"
-PIDS=()
 
 log()  { printf '\033[1;36m[tun-demo]\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m[tun-demo FAIL]\033[0m %s\n' "$*"; exit 1; }
 pass() { printf '\033[1;32m[tun-demo PASS]\033[0m %s\n' "$*"; }
+
+# Re-exec under sudo so the whole demo (recognized devices + routes) is a
+# single privileged transaction, carrying caller overrides through env.
+if [ "$(id -u)" -ne 0 ]; then
+  printf '\033[1;36m[tun-demo]\033[0m re-execing as root (sudo)...\n'
+  # sudo(8) drops the environment by default; hand the overrides we care
+  # about explicitly (empty values fall back to defaults in the root process).
+  exec sudo env \
+    TUN_A="${TUN_A:-}"    TUN_B="${TUN_B:-}" \
+    IP_A="${IP_A:-}"      IP_B="${IP_B:-}" \
+    PEER_A="${PEER_A:-}"  PEER_B="${PEER_B:-}" \
+    "$0" "$@"
+fi
+
+# The scratch dir is created only after the exec so the unprivileged copy of
+# this script never leaks a temp dir behind.
+TMP="$(mktemp -d)"
+KEYA="$TMP/key.a"
+KEYB="$TMP/key.b"
+PIDS=()
 
 cleanup() {
   for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null; done
@@ -32,18 +48,32 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Re-exec under sudo so the whole demo (recognized devices + routes) is a
-# single privileged transaction.
-if [ "$(id -u)" -ne 0 ]; then
-  printf '\033[1;36m[tun-demo]\033[0m re-execing as root (sudo)...\n'
-  exec sudo "$0" "$@"
-fi
+# pick_utun prints the lowest utun index that is not currently in use and not
+# already handed out by this script. Excludes are passed as additional args.
+pick_utun() {
+  local used skip i
+  used="$(ifconfig -a 2>/dev/null | grep -oE '^utun[0-9]+' | sed 's/utun//' | tr '\n' ' ')"
+  used="$used $*"
+  for i in $(seq 0 63); do
+    case " $used " in
+      *" $i "*) ;;
+      *) echo "$i"; return 0 ;;
+    esac
+  done
+  return 1
+}
 
 OS="$(uname -s)"
 case "$OS" in
   Darwin)
-    TUN_A="${TUN_A:-utun9}"
-    TUN_B="${TUN_B:-utun10}"
+    if [ -z "${TUN_A:-}" ]; then
+      A_IDX="$(pick_utun)" || fail "no free utun index for agent A"
+      TUN_A="utun$A_IDX"
+    fi
+    if [ -z "${TUN_B:-}" ]; then
+      B_IDX="$(pick_utun "${TUN_A#utun}")" || fail "no second free utun index for agent B"
+      TUN_B="utun$B_IDX"
+    fi
     ;;
   Linux)
     TUN_A="${TUN_A:-meshlink_a}"
@@ -57,6 +87,7 @@ IP_A="${IP_A:-10.61.0.1}"
 IP_B="${IP_B:-10.62.0.2}"
 PEER_B="${PEER_B:-$IP_B}"
 PEER_A="${PEER_A:-$IP_A}"
+log "using $TUN_A / $TUN_B on $OS ($IP_A / $IP_B)"
 
 # build
 if [ ! -x "$BIN/coordinator" ] || [ ! -x "$BIN/agent" ]; then

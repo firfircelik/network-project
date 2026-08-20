@@ -1,7 +1,9 @@
 package control
 
 import (
+	"fmt"
 	"net"
+	"sync"
 	"testing"
 
 	"meshlink/internal/noisework"
@@ -94,6 +96,76 @@ func TestHandshakeAndMessages(t *testing.T) {
 	}
 	if string(got) != "hello" {
 		t.Fatalf("client got %q", got)
+	}
+}
+
+// TestConcurrentWriteMsg hammers a single connection from many goroutines to
+// prove the write lock serializes Encrypt+write. Concurrent Encrypt against the
+// same Noise session would reuse a (key, nonce) pair — a ChaCha20-Poly1305
+// forgery risk — so this must run under -race too.
+func TestConcurrentWriteMsg(t *testing.T) {
+	srvKP := mustKP(t)
+	agentKP := mustKP(t)
+
+	pc, sc := tcpPair(t)
+	type acceptResult struct {
+		peerStatic []byte
+		conn       *Conn
+		err        error
+	}
+	acceptDone := make(chan acceptResult, 1)
+	go func() {
+		peerStatic, c, err := Accept(sc, srvKP)
+		acceptDone <- acceptResult{peerStatic, c, err}
+	}()
+	cli, err := Initiate(pc, agentKP, srvKP.Public)
+	if err != nil {
+		t.Fatalf("Initiate: %v", err)
+	}
+	res := <-acceptDone
+	if res.err != nil {
+		t.Fatalf("Accept: %v", res.err)
+	}
+
+	const n = 50
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(n)
+	writeErr := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			writeErr <- cli.WriteMsg([]byte(fmt.Sprintf("msg-%d", i)))
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(writeErr)
+	for err := range writeErr {
+		if err != nil {
+			t.Fatalf("concurrent WriteMsg: %v", err)
+		}
+	}
+
+	// Every message must decrypt intact on the other side; a corrupted
+	// frame (from a shared nonce) would fail authentication here. Because
+	// lock acquisition order is arbitrary, labels arrive in any order — the
+	// reader must still see exactly n distinct, valid messages.
+	seen := make(map[string]bool, n)
+	for i := 0; i < n; i++ {
+		got, err := res.conn.ReadMsg()
+		if err != nil {
+			t.Fatalf("reader message %d: %v", i, err)
+		}
+		label := string(got)
+		if seen[label] {
+			t.Fatalf("duplicate frame content %q (nonce reuse?)", label)
+		}
+		seen[label] = true
+	}
+	if len(seen) != n {
+		t.Fatalf("reader saw %d distinct frames, want %d", len(seen), n)
 	}
 }
 

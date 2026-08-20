@@ -32,6 +32,11 @@ const nonceWireLen = 8
 // unbounded Noise CPU while the session is mid-handshake (G5).
 const hs1MaxPerSec = 8
 
+// sessionMaxAge forces a re-handshake (and fresh key material) after a session
+// has lived this long, so keys are rotated on an absolute timer as well as by
+// message count (SPEC §3 "session age limit").
+const sessionMaxAge = 24 * time.Hour
+
 // Transport abstracts how the owning agent emits datagrams.
 type Transport interface {
 	// SendDirect sends a framed datagram to dst, egressing through the
@@ -62,6 +67,7 @@ type Peer struct {
 	sess        *noisework.Session
 	replay      *replayWindow // DATA nonce acceptance gate for the current session
 	established bool
+	sessSince   time.Time // when the current session was installed (age rotation)
 	phaseStart  time.Time
 	lastHS1     time.Time
 	lastSent    time.Time
@@ -199,7 +205,15 @@ func (p *Peer) Run(ctx context.Context) {
 			lastHS1 := p.lastHS1
 			lastSent := p.lastSent
 			phaseStart := p.phaseStart
+			sessSince := p.sessSince
 			p.mu.Unlock()
+
+			if established && time.Since(sessSince) > sessionMaxAge {
+				// Age-based key rotation: drop the key material and
+				// re-establish the session from scratch.
+				p.forceRehandshake()
+				continue
+			}
 
 			switch {
 			case !established:
@@ -209,15 +223,27 @@ func (p *Peer) Run(ctx context.Context) {
 				if time.Since(phaseStart) > p.attemptFor(mode) {
 					p.switchMode(mode)
 				}
-			case path == disco.PathRelay && mode != disco.PathDirect &&
-				p.initiator && time.Since(lastHS1) > disco.ReestablishInterval &&
-				p.DirectEP != nil:
-				p.retryDirect()
+			case path == disco.PathRelay && p.initiator && p.DirectEP != nil:
+				if mode == disco.PathDirect {
+					// A roaming probe is in flight: give it a full direct
+					// attempt window, then revert to the relay instead of
+					// abandoning the working path over one lost HS1.
+					if time.Since(phaseStart) > disco.DirectAttempt {
+						p.abandonRoaming()
+					}
+				} else if time.Since(lastHS1) > disco.ReestablishInterval {
+					p.retryDirect()
+				}
+				if time.Since(lastSent) > disco.KeepaliveInterval {
+					if err := p.Send([]byte{}); err != nil {
+						continue
+					}
+				}
 			default:
 				// established: keepalive keeps NAT mappings and liveness.
 				if time.Since(lastSent) > disco.KeepaliveInterval {
 					if err := p.Send([]byte{}); err != nil {
-						return
+						continue
 					}
 				}
 			}
@@ -324,6 +350,47 @@ func (p *Peer) retryDirect() {
 	p.mu.Unlock()
 	frame := record.Frame(record.TypeHS1, msg1)
 	_ = p.send.SendDirect(p.DirectEP, frame)
+}
+
+// abandonRoaming reverts a relay→direct roaming attempt back to the relay path
+// after the direct probe timed out. The established relay session is untouched,
+// so data keeps flowing while direct is re-probed on the next cadence.
+func (p *Peer) abandonRoaming() {
+	p.mu.Lock()
+	if p.mode != disco.PathDirect {
+		p.mu.Unlock()
+		return
+	}
+	p.mode = disco.PathRelay
+	p.initiatorHS = nil
+	p.hs1Frame = nil
+	p.responder = nil
+	p.phaseStart = time.Now()
+	p.mu.Unlock()
+}
+
+// forceRehandshake tears down the current key material so Run re-establishes
+// the session (age-based rotation; keepalive/nonce-exhaustion recovery).
+func (p *Peer) forceRehandshake() {
+	p.mu.Lock()
+	p.sess = nil
+	p.replay = newReplayWindow(replayWindowSizeBits)
+	p.established = false
+	p.initiatorHS = nil
+	p.hs1Frame = nil
+	p.responder = nil
+	p.phaseStart = time.Now()
+	p.mu.Unlock()
+}
+
+// SetDirectEP updates the advertised direct endpoint, e.g. when the control
+// plane reports a changed public address after a NAT remap. Lock-held reads in
+// Run and receiveLoop observe the pointer under p.mu; DirectEP itself is read
+// from locked contexts, so replacing the pointer value here is safe.
+func (p *Peer) SetDirectEP(ep *net.UDPAddr) {
+	p.mu.Lock()
+	p.DirectEP = ep
+	p.mu.Unlock()
 }
 
 // handleFrameByPath routes a frame to the correct path logic.
@@ -473,6 +540,7 @@ func (p *Peer) setSessionLocked(sess *noisework.Session, path disco.Path) {
 	// Continue holding the current mode so handshake traffic keeps flowing
 	// on the same path.
 	p.mode = path
+	p.sessSince = time.Now()
 	p.lastSent = time.Now()
 }
 
@@ -492,13 +560,17 @@ func (p *Peer) onData(payload []byte) {
 		return
 	}
 	nonce := binary.BigEndian.Uint64(payload[:8])
-	if p.replay == nil || !p.replay.Accept(nonce) {
+	// The replay gate is a two-phase check: the window is only committed for a
+	// nonce whose frame AUTHENTICATED successfully, so a spoofed datagram with
+	// a wild nonce cannot slide the window and kill the session.
+	if p.replay == nil || !p.replay.Check(nonce) {
 		return // replayed or outside the sliding window
 	}
 	plain, err := sess.DecryptAt(nonce, payload[8:])
 	if err != nil {
 		return
 	}
+	p.replay.Commit(nonce)
 	if len(plain) > 0 {
 		// Non-blocking send while holding the lock: the channel can only be
 		// closed under the same lock, so a concurrent Run-defer close cannot

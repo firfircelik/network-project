@@ -15,6 +15,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/flynn/noise"
 	"golang.org/x/crypto/curve25519"
@@ -28,14 +30,24 @@ func LoadOrCreateKeyfile(path string) (*Keypair, error) {
 	if path == "" {
 		return nil, errors.New("noisework: keyfile path is required")
 	}
-	if data, err := os.ReadFile(path); err == nil {
-		priv, perr := hex.DecodeString(string(data))
+	data, err := os.ReadFile(path)
+	if err == nil {
+		// Trim surrounding whitespace so a file written with a trailing
+		// newline (e.g. via echo) still parses.
+		priv, perr := hex.DecodeString(strings.TrimSpace(string(data)))
 		if perr == nil && len(priv) == KeySize {
 			kp, kerr := keypairFromPrivate(priv)
 			if kerr == nil {
 				return kp, nil
 			}
 		}
+		// The file exists but does not hold a usable key: fail loudly rather
+		// than silently rotating this node's long-term identity (which would
+		// break coordinator/agent key pinning).
+		return nil, fmt.Errorf("noisework: existing keyfile %s is corrupt: %w", path, err)
+	}
+	if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("noisework: read keyfile %s: %w", path, err)
 	}
 	kp, err := GenerateKeypair()
 	if err != nil {
@@ -160,17 +172,21 @@ func ParsePublicKeyHex(s string) ([]byte, error) {
 // nonces with a replay window (see internal/peer) and may decrypt out of
 // order because DecryptAt seeks the recv CipherState to the frame's nonce.
 // Keys rotate deterministically at every DefaultRekeyEvery-th message, which
-// needs no extra protocol messages and tolerates lost frames.
+// needs no extra protocol messages and tolerates lost frames. Reorder
+// tolerance spans frames *within a rekey epoch*; a frame lagging one full
+// epoch behind cannot be recovered because epoch keys advance one-way (the
+// previous epoch's key material is gone once a newer epoch has been seen).
 type Session struct {
 	peerStatic     []byte
 	channelBinding []byte
 	send           *noise.CipherState
 	recv           *noise.CipherState
-	sendCount      uint64 // nonce of the next send
-	recvCount      uint64 // expected nonce for the in-order Decrypt form
-	sendEpoch      uint64 // rekeys already applied to send
-	recvEpoch      uint64 // rekeys already applied to recv
-	rekeyEvery     uint64 // message count between key rotations (0 = default)
+	sendCount      uint64    // nonce of the next send
+	recvCount      uint64    // expected nonce for the in-order Decrypt form
+	sendEpoch      uint64    // rekeys already applied to send
+	recvEpoch      uint64    // rekeys already applied to recv
+	rekeyEvery     uint64    // message count between key rotations (0 = default)
+	start          time.Time // when the handshake completed (age-based rotation)
 }
 
 // Send authenticates and encrypts plaintext for the remote peer, applying any
@@ -311,6 +327,15 @@ func (s *Session) MaxPlaintextLen() int {
 	return maxPlaintextLen
 }
 
+// Age returns how long this session has been established (0 before the
+// handshake completes). Callers use it to rotate keys on an absolute timer.
+func (s *Session) Age() time.Duration {
+	if s == nil || s.start.IsZero() {
+		return 0
+	}
+	return time.Since(s.start)
+}
+
 // Initiator drives the initiator half of the Noise XX handshake:
 // msg1 = e, msg2 = e,ee,s,es, msg3 = s,se.
 type Initiator struct {
@@ -416,6 +441,7 @@ func (i *Initiator) WriteMessage3() ([]byte, error) {
 	i.session.recv = recvCs
 	i.session.peerStatic = clone(i.hs.PeerStatic())
 	i.session.channelBinding = clone(i.hs.ChannelBinding())
+	i.session.start = time.Now()
 	i.phase = phaseComplete
 	return msg, nil
 }
@@ -501,6 +527,7 @@ func (r *Responder) ReadMessage3(msg3 []byte) (*Session, error) {
 		peerStatic:     clone(r.hs.PeerStatic()),
 		channelBinding: clone(r.hs.ChannelBinding()),
 		rekeyEvery:     DefaultRekeyEvery,
+		start:          time.Now(),
 	}
 	r.phase = phaseComplete
 	return r.session, nil

@@ -73,14 +73,17 @@ func main() {
 			fs.DurationVar(&interval, "interval", 0, "delay between pings")
 		}
 		_ = fs.Parse(os.Args[2:])
+		mode := os.Args[1]
 		if cfg.Name == "" || cfg.Keyfile == "" || cfg.CoordKey == "" {
 			log.Fatal("--name, --keyfile and --coord-pubkey are required")
+		}
+		if mode == "ping" && (cfg.TunName != "" || cfg.TunIP != "" || len(cfg.TunPeers) > 0) {
+			log.Fatal("TUN flags (--tun, --tun-ip, --tun-peer) are only valid in 'up' mode")
 		}
 		a, err := agent.New(*cfg)
 		if err != nil {
 			log.Fatalf("agent: %v", err)
 		}
-		mode := os.Args[1]
 		run = func() error {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()

@@ -108,7 +108,9 @@ func TestRouterDropsMalformed(t *testing.T) {
 			t.Fatalf("malformed packet routed: %v", c)
 		}
 	}
-	if r.PktsIn != uint64(len(cases)) || r.PktsRouted != 0 || r.PktsDropped != uint64(len(cases)) {
+	// Malformed datagrams are offered but never counted as valid traffic: they
+	// only bump the drop counter (PktsIn counts valid IPv4 datagrams offered).
+	if r.PktsIn != 0 || r.PktsRouted != 0 || r.PktsDropped != uint64(len(cases)) {
 		t.Fatalf("counters: in=%d routed=%d dropped=%d", r.PktsIn, r.PktsRouted, r.PktsDropped)
 	}
 }

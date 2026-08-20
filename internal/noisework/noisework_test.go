@@ -2,6 +2,8 @@ package noisework
 
 import (
 	"bytes"
+	"encoding/hex"
+	"os"
 	"strings"
 	"testing"
 )
@@ -15,6 +17,60 @@ func mustKeypair(t *testing.T) *Keypair {
 		t.Fatalf("GenerateKeypair: %v", err)
 	}
 	return kp
+}
+
+func TestLoadOrCreateKeyfileTrailingNewline(t *testing.T) {
+	kp := mustKeypair(t)
+	dir := t.TempDir()
+	path := dir + "/agent.key"
+	// Write the hex key with a trailing newline (e.g. written by echo).
+	if err := os.WriteFile(path, []byte(hex.EncodeToString(kp.Private)+"\n"), 0o600); err != nil {
+		t.Fatalf("write keyfile: %v", err)
+	}
+	got, err := LoadOrCreateKeyfile(path)
+	if err != nil {
+		t.Fatalf("LoadOrCreateKeyfile with trailing newline: %v", err)
+	}
+	if hex.EncodeToString(got.Private) != hex.EncodeToString(kp.Private) {
+		t.Fatal("loaded key differs from the one that was written")
+	}
+}
+
+func TestLoadOrCreateKeyfileCorruptPreserved(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/agent.key"
+	corrupt := "this-is-not-hex-and-not-a-key\n"
+	if err := os.WriteFile(path, []byte(corrupt), 0o600); err != nil {
+		t.Fatalf("write keyfile: %v", err)
+	}
+	if _, err := LoadOrCreateKeyfile(path); err == nil {
+		t.Fatal("corrupt keyfile was silently accepted (identity would rotate)")
+	}
+	// The corrupt file must NOT have been overwritten by a fresh key: a node
+	// that silently regenerates its long-term identity breaks key pinning.
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read keyfile after failure: %v", err)
+	}
+	if string(after) != corrupt {
+		t.Fatalf("corrupt keyfile was overwritten; got %q", after)
+	}
+}
+
+func TestLoadOrCreateKeyfileCreatesWhenMissing(t *testing.T) {
+	path := t.TempDir() + "/new.key"
+	kp, err := LoadOrCreateKeyfile(path)
+	if err != nil {
+		t.Fatalf("LoadOrCreateKeyfile on missing file: %v", err)
+	}
+	// A second load must return the same persistent identity.
+	kp2, err := LoadOrCreateKeyfile(path)
+	if err != nil {
+		t.Fatalf("LoadOrCreateKeyfile second load: %v", err)
+	}
+	if hex.EncodeToString(kp.Private) != hex.EncodeToString(kp2.Private) {
+		t.Fatal("identity rotated between loads")
+	}
 }
 
 // newTestSides wires up an initiator expecting respKP and a responder using

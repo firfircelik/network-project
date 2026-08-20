@@ -85,6 +85,11 @@ func (b *tunBridge) run(ctx context.Context) error {
 
 // inbound writes one decrypted peer payload (a plain IP packet) to the device.
 func (b *tunBridge) inbound(payload []byte) error {
+	// Never hand the kernel a packet larger than the device MTU; oversized
+	// frames would be silently truncated on write.
+	if len(payload) > b.dev.MTU() {
+		return fmt.Errorf("tun write: %d bytes exceeds device MTU %d", len(payload), b.dev.MTU())
+	}
 	if _, err := b.dev.Write(payload); err != nil {
 		return fmt.Errorf("tun write: %w", err)
 	}

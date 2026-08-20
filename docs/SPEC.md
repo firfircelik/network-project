@@ -103,9 +103,17 @@ Behavior: after every register, the coordinator sends `peer_list` to ALL peers (
   matches the peer pubkey received from the coordinator.
 - Transport data: `CipherState.WriteMessage` → ciphertext; frame type DATA.
 - Data plane (Phase 2): explicit 64-bit nonce + WireGuard-style sliding window on the
-  receiver (2048-bit bitmap) — duplicate/stale nonce rejection, loss tolerance.
+  receiver (2048-bit bitmap). The window is **two-phase**: `Check` never mutates,
+  and a nonce is committed only after the frame's AEAD authentication succeeds —
+  an unauthenticated datagram with a wild nonce cannot slide the window away from
+  honest frames. Duplicate/stale nonce rejection with reorder/loss tolerance.
 - Periodic rekey: key rotation every `RekeyEvery` (default 2^20) messages;
-  `maxEpochJump` DoS cap; nonce-exhaustion guard and session age limit.
+  `maxEpochJump` DoS cap; nonce-exhaustion guard. Reorder tolerance spans frames
+  *within* a rekey epoch; a frame lagging a full epoch cannot be recovered because
+  epoch keys advance one-way (deterministic drop — documented behavior).
+- Session age limit: a session's key material is dropped and the tunnel
+  re-handshakes after 24 h (`sessionMaxAge`), rotating keys on an absolute timer
+  as well as by message count.
 - Keepalive: empty DATA frame after 10 s of silence (NAT mapping + liveness).
 
 ## 4. Package API contracts

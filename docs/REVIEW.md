@@ -116,3 +116,42 @@ All applicable items in the report were resolved and verification was done in
 three layers (unit test `-race`, `go vet`/`gofmt`, end-to-end `make demo`). M1
 (relay-side authentication) was closed in Phase 3; real-network tests were
 intentionally left as a Phase 4 remnant.
+
+---
+
+## Re-review — 2026-08-20 (post documentation pass)
+
+Second full pass over the data/control planes. Adds a replay-window
+commit-after-auth gate, serialized control-plane encryption, coordinator
+registry lifecycle management, and daemon hygiene.
+
+### Newly fixed findings
+
+| Item | Severity | Fix |
+|---|---|---|
+| R1 — Replay window slid on unauthenticated datagrams | High/security | Nonce is committed to the window **only after** the frame's AEAD authenticates (`replayWindow.Check`/`Commit`; `Peer.onData`) |
+| R2 — Concurrent `control.WriteMsg` encrypted outside the lock | High/security | Encryption moved inside `wm`, so the Noise AEAD nonce counter advances under one writer (ChaCha20-Poly1305 nonce reuse) |
+| R3 — Coordinator registry lived forever after disconnect | High/availability | `dropClient` prunes the registration + broadcast slot on disconnect; names are reusable immediately |
+| R4 — Coordinator had no read idle timeout | High/availability | `control.SetReadDeadline` + 90 s idle re-armed before every `ReadMsg` |
+| R5 — Agent re-registration closed the *replacement* control conn | High | `ctrlReaderLoop` closes its local `ctrl`, never the shared `a.ctrl` field |
+| R6 — Corrupt keyfile silently rotated the node identity | High/security | `LoadOrCreateKeyfile` now errors on an unreadable existing keyfile and never overwrites it |
+| R7 — Roaming probe abandonment over one lost HS1 | Medium/availability | Relay→direct roaming gets a full `DirectAttempt` window, then reverts to relay (`abandonRoaming`) |
+| R8 — Keepalive error killed the peer goroutine | Medium/availability | Failed keepalives now `continue` the Run loop instead of returning |
+| R9 — Noise session keys had no age limit | Medium/security | `sessionMaxAge` (24 h) forces a re-handshake (`forceRehandshake`) |
+| R10 — Stale advertised endpoints kept forever | Medium | `applyPeers` refreshes known peers via `Peer.SetDirectEP` on every peer_list |
+| R11 — Per-source budgets can't cap a multi-source flood | Medium/availability | `GlobalMaxPPS`/`GlobalMaxBytesPS` bound total relay work across all sources (defaults 5000 pps / 8 MiB/s); `maybeSweep` now also runs on drop paths |
+| R12 — `take` let one oversized packet consume a full budget window | Low | Effective cost is clamped to the cap |
+| R13 — `make fuzz-smoke` was broken | Low | Per-package/per-function fuzz loop |
+| R14 — `record.Frame` silently wrapped oversized payloads | Low | Panics (programmer-error guard) |
+| R15 — STUN read deadline leaked onto the caller's socket | Low | Deadline cleared on return |
+| R16 — Router `PktsIn` counted malformed datagrams | Low | Counter only counts valid offered traffic |
+| R17 — `protocol.TypeHello` dead | Low | Removed |
+| R18 — `scripts/tun-demo.sh` macOS defaults clashed with system utun + sudo dropped overrides | Low | Free-index scan; `sudo env` carries `TUN_*/IP_*/PEER_*` through; pre-sudo temp leak removed |
+| R19 — Stale dependencies (x/crypto 2021) | Low | x/crypto v0.55.0, x/sys v0.47.0, `go mod tidy -diff` clean |
+
+### Behavioral notes
+
+- Reorder tolerance applies within a rekey epoch; frames lagging a full epoch
+  are deterministically dropped (one-way epoch keys) — documented in SPEC §3.
+- Coordinator broadcast now snapshots control sessions under the lock and
+  evicts stalled writers so one blocked reader cannot stall the mesh.

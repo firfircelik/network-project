@@ -137,6 +137,10 @@ func ResolvePublicAddr(conn *net.UDPConn, server *net.UDPAddr, timeout time.Dura
 	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
 		return nil, fmt.Errorf("stun: set read deadline: %w", err)
 	}
+	// Clear the caller's deadline on the way out: this method only bounds the
+	// response wait and must not leave its reader in a permanently-expired
+	// state for subsequent reads on the same socket.
+	defer conn.SetReadDeadline(time.Time{})
 	buf := make([]byte, 65536)
 	for {
 		n, _, err := conn.ReadFromUDP(buf)

@@ -18,15 +18,36 @@ import (
 	"meshlink/internal/stun"
 )
 
-// broadcastWriteDeadline bounds how long a control-plane write may block on a
-// client that has stopped reading before the connection is reclaimed.
-const broadcastWriteDeadline = 2 * time.Second
+// Control-plane hardening limits. They keep a single authenticated peer from
+// growing the registry or the broadcast frame without bound (whole-mesh DoS).
+const (
+	// broadcastWriteDeadline bounds how long a control-plane write may block on
+	// a client that has stopped reading before the connection is reclaimed.
+	broadcastWriteDeadline = 2 * time.Second
+	// readIdleTimeout is re-armed before every control read, so a client that
+	// handshakes and then goes silent is reclaimed instead of holding a
+	// goroutine + buffer forever.
+	readIdleTimeout = 90 * time.Second
+	// maxIDLen bounds the peer name an authenticated client may register.
+	maxIDLen = 64
+	// maxEndpointsPerPeer bounds how many endpoints an agent may advertise.
+	maxEndpointsPerPeer = 2
+	// maxEndpointLen bounds the serialized length of a single endpoint.
+	maxEndpointLen = 255
+	// maxRegistrations caps the registry, keeping the broadcast peer_list
+	// comfortably below the 1 MiB control-message ceiling.
+	maxRegistrations = 512
+	// maxControlLineLen mirrors control.maxMsgLen (1 MiB): a peer_list that
+	// would exceed it is never assembled/broadcast.
+	maxControlLineLen = 1 << 20
+)
 
 // Registration is a peer's current control-plane record.
 type Registration struct {
 	ID        string
 	PubKey    string
 	Endpoints []string
+	Owner     net.Conn // the connection that currently owns this ID
 }
 
 // Config configures a coordinator server.
@@ -123,15 +144,14 @@ func (s *Server) Close() error {
 // Run serves the control plane and STUN until ctx is done.
 func (s *Server) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
-	started := make(chan struct{})
-	go func() {
-		close(started)
-		s.serveSTUN(ctx)
-	}()
-	wg.Add(1)
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		s.serveControl(ctx)
+		s.serveSTUN(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		s.serveControl(ctx, &wg)
 	}()
 
 	select {
@@ -165,7 +185,7 @@ func (s *Server) serveSTUN(ctx context.Context) {
 	}
 }
 
-func (s *Server) serveControl(ctx context.Context) {
+func (s *Server) serveControl(ctx context.Context, wg *sync.WaitGroup) {
 	for {
 		conn, err := s.ctrlLn.Accept()
 		if err != nil {
@@ -175,19 +195,78 @@ func (s *Server) serveControl(ctx context.Context) {
 			case <-s.closed:
 				return
 			default:
+				// Backoff instead of hot-looping: accept errors such as
+				// EMFILE/ENFILE are often transient but expensive to spin on.
+				time.Sleep(100 * time.Millisecond)
 				continue
 			}
 		}
-		go s.handleClient(ctx, conn)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.handleClient(ctx, conn)
+		}()
 	}
+}
+
+// cleanupConn removes a connection (pending, registered or idle) from all
+// maps and releases the ID it owned back to the registry.
+func (s *Server) cleanupConn(conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	s.mu.Lock()
+	if id := s.clients[conn]; id != "" {
+		if reg := s.registrations[id]; reg != nil && reg.Owner == conn {
+			// Only drop the registration when this very conn still owns it;
+			// a re-registration from a newer conn supersedes the owner.
+			delete(s.registrations, id)
+		}
+	}
+	delete(s.clients, conn)
+	delete(s.ctrlConns, conn)
+	s.mu.Unlock()
+	conn.Close()
+}
+
+// evict drops a connection the server decided to reclaim (e.g. a stalled or
+// misbehaving write target). The client goroutine observes the closed socket
+// and calls cleanupConn, which is idempotent.
+func (s *Server) evict(conn net.Conn) {
+	if conn == nil {
+		return
+	}
+	s.cleanupConn(conn)
+}
+
+// validateRegistration applies the server-side bounds to a register message.
+func (s *Server) validateRegistration(msg *protocol.Message) error {
+	if msg.ID == "" {
+		return fmt.Errorf("id is required")
+	}
+	if len(msg.ID) > maxIDLen {
+		return fmt.Errorf("id exceeds %d bytes", maxIDLen)
+	}
+	if len(msg.Endpoints) > maxEndpointsPerPeer {
+		return fmt.Errorf("too many endpoints")
+	}
+	for _, ep := range msg.Endpoints {
+		if len(ep) > maxEndpointLen {
+			return fmt.Errorf("endpoint exceeds %d bytes", maxEndpointLen)
+		}
+	}
+	return nil
 }
 
 // handleClient performs the Noise control-plane handshake, then reads
 // register messages and broadcasts peer lists over the encrypted session.
 func (s *Server) handleClient(ctx context.Context, conn net.Conn) {
-	defer func() {
-		conn.Close()
-	}()
+	// Track the conn from the start so Close() can abort mid-handshake
+	// sockets instead of waiting out the handshake timeout.
+	s.mu.Lock()
+	s.clients[conn] = ""
+	s.mu.Unlock()
+	defer s.cleanupConn(conn)
 
 	// G3: the agent authenticates us against our static key; we authenticate
 	// the agent's static key — its public identity — from the handshake itself.
@@ -196,17 +275,15 @@ func (s *Server) handleClient(ctx context.Context, conn net.Conn) {
 		return
 	}
 	s.mu.Lock()
-	s.clients[conn] = ""
 	s.ctrlConns[conn] = ctrl
 	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.clients, conn)
-		delete(s.ctrlConns, conn)
-		s.mu.Unlock()
-	}()
 
 	for {
+		// Re-arm the idle deadline so a client that handshakes and then never
+		// sends bytes does not squat a goroutine and buffered connection.
+		if nc := ctrl.NetConn(); nc != nil {
+			_ = nc.SetReadDeadline(time.Now().Add(readIdleTimeout))
+		}
 		plain, err := ctrl.ReadMsg()
 		if err != nil {
 			return
@@ -218,12 +295,8 @@ func (s *Server) handleClient(ctx context.Context, conn net.Conn) {
 		if msg.Type != protocol.TypeRegister {
 			continue
 		}
-		if msg.ID == "" {
-			s.writeMsg(conn, protocol.Message{Type: protocol.TypeError, Msg: "empty id"})
-			continue
-		}
-		if msg.PubKey == "" {
-			s.writeMsg(conn, protocol.Message{Type: protocol.TypeError, Msg: "pubkey is required"})
+		if err := s.validateRegistration(msg); err != nil {
+			s.writeMsg(conn, protocol.Message{Type: protocol.TypeError, Msg: err.Error()})
 			continue
 		}
 		// The register's public key must be the identity that the Noise
@@ -242,10 +315,17 @@ func (s *Server) handleClient(ctx context.Context, conn net.Conn) {
 			s.writeMsg(conn, protocol.Message{Type: protocol.TypeError, Msg: "id already registered with a different key"})
 			continue
 		}
+		// Registry cap: bound the broadcast frame and the memory footprint.
+		if _, exists := s.registrations[msg.ID]; !exists && len(s.registrations) >= maxRegistrations {
+			s.mu.Unlock()
+			s.writeMsg(conn, protocol.Message{Type: protocol.TypeError, Msg: "registry full"})
+			continue
+		}
 		s.registrations[msg.ID] = &Registration{
 			ID:        msg.ID,
 			PubKey:    msg.PubKey,
 			Endpoints: msg.Endpoints,
+			Owner:     conn,
 		}
 		s.clients[conn] = msg.ID
 		// Broadcast the full current peer list to everybody (including sender).
@@ -269,9 +349,16 @@ func (s *Server) handleClient(ctx context.Context, conn net.Conn) {
 	}
 }
 
+// broadcast sends a control message to every connected client. A client that
+// fails to swallow its write is evicted so one stalled reader cannot stall
+// the whole mesh.
 func (s *Server) broadcast(m protocol.Message) {
 	line, err := protocol.EncodeLine(m)
 	if err != nil {
+		return
+	}
+	if len(line) > maxControlLineLen {
+		s.log.Printf("coordinator: dropping broadcast (%d bytes > ceiling)", len(line))
 		return
 	}
 	s.mu.RLock()
@@ -281,7 +368,17 @@ func (s *Server) broadcast(m protocol.Message) {
 	}
 	s.mu.RUnlock()
 	for _, c := range conns {
-		_ = c.WriteMsg(line)
+		nc := c.NetConn()
+		if nc != nil {
+			_ = nc.SetWriteDeadline(time.Now().Add(broadcastWriteDeadline))
+		}
+		err := c.WriteMsg(line)
+		if nc != nil {
+			_ = nc.SetWriteDeadline(time.Time{})
+		}
+		if err != nil {
+			s.evict(nc)
+		}
 	}
 }
 

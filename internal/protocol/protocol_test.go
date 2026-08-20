@@ -59,11 +59,11 @@ func TestDecodeEmpty(t *testing.T) {
 }
 
 func TestTrailingNewlineTolerated(t *testing.T) {
-	msg, err := DecodeLine([]byte(`{"type":"hello","id":"x"}` + "\n"))
+	msg, err := DecodeLine([]byte(`{"type":"register","id":"x","pubkey":"abc"}` + "\n"))
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if msg.Type != TypeHello || msg.ID != "x" {
+	if msg.Type != TypeRegister || msg.ID != "x" || msg.PubKey != "abc" {
 		t.Fatalf("mismatch: %+v", msg)
 	}
 }

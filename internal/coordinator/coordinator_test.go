@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -192,6 +193,92 @@ func TestRegistrationKeyPinning(t *testing.T) {
 	connD.send(protocol.Message{Type: protocol.TypeRegister, ID: "c", PubKey: kpD.PublicHex()[:0]})
 	if ld := connD.recv(t); ld.Type != protocol.TypeError {
 		t.Fatalf("D expected TypeError for missing pubkey, got %+v", ld)
+	}
+}
+
+func TestRegistrationPrunedOnDisconnect(t *testing.T) {
+	s, ctrlAddr, _ := startServer(t)
+
+	kpA := mustKey(t)
+	connA := connect(t, s, ctrlAddr, kpA)
+	connA.send(protocol.Message{
+		Type: protocol.TypeRegister, ID: "a", PubKey: kpA.PublicHex(),
+		Endpoints: []string{"127.0.0.1:19301"},
+	})
+	if la := connA.recv(t); la.Type != protocol.TypePeerList {
+		t.Fatalf("A expected peer_list, got %+v", la)
+	}
+	s.mu.RLock()
+	_, regged := s.registrations["a"]
+	s.mu.RUnlock()
+	if !regged {
+		t.Fatal("registration for 'a' missing after register")
+	}
+
+	// Disconnect A; the registry must release the name so it cannot keep
+	// being advertised with a dead endpoint forever.
+	_ = connA.ctrl.Close()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		s.mu.RLock()
+		_, present := s.registrations["a"]
+		s.mu.RUnlock()
+		if !present {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("registration 'a' not pruned after disconnect")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// A fresh connection with the same identity can re-register cleanly.
+	connA2 := connect(t, s, ctrlAddr, kpA)
+	connA2.send(protocol.Message{
+		Type: protocol.TypeRegister, ID: "a", PubKey: kpA.PublicHex(),
+		Endpoints: []string{"127.0.0.1:19301"},
+	})
+	if la := connA2.recv(t); la.Type != protocol.TypePeerList {
+		t.Fatalf("A2 expected peer_list after re-register, got %+v", la)
+	}
+}
+
+func TestRegistrationValidation(t *testing.T) {
+	s, ctrlAddr, _ := startServer(t)
+	kp := mustKey(t)
+	conn := connect(t, s, ctrlAddr, kp)
+
+	// Overlong ID.
+	conn.send(protocol.Message{
+		Type: protocol.TypeRegister, ID: strings.Repeat("x", maxIDLen+1), PubKey: kp.PublicHex(),
+	})
+	if lm := conn.recv(t); lm.Type != protocol.TypeError {
+		t.Fatalf("expected TypeError for overlong ID, got %+v", lm)
+	}
+	// Too many endpoints.
+	conn.send(protocol.Message{
+		Type: protocol.TypeRegister, ID: "ok", PubKey: kp.PublicHex(),
+		Endpoints: []string{"1.1.1.1:1", "2.2.2.2:2", "3.3.3.3:3"},
+	})
+	if lm := conn.recv(t); lm.Type != protocol.TypeError {
+		t.Fatalf("expected TypeError for too many endpoints, got %+v", lm)
+	}
+	// Overlong endpoint.
+	conn.send(protocol.Message{
+		Type: protocol.TypeRegister, ID: "ok", PubKey: kp.PublicHex(),
+		Endpoints: []string{strings.Repeat("e", maxEndpointLen+1)},
+	})
+	if lm := conn.recv(t); lm.Type != protocol.TypeError {
+		t.Fatalf("expected TypeError for overlong endpoint, got %+v", lm)
+	}
+	// A well-formed register still succeeds after all the refusals.
+	conn.send(protocol.Message{
+		Type: protocol.TypeRegister, ID: "ok", PubKey: kp.PublicHex(),
+		Endpoints: []string{"127.0.0.1:19301"},
+	})
+	if lm := conn.recv(t); lm.Type != protocol.TypePeerList {
+		t.Fatalf("expected peer_list after valid register, got %+v", lm)
 	}
 }
 

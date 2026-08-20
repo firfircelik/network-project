@@ -301,6 +301,66 @@ func TestServerRateLimit(t *testing.T) {
 	}
 }
 
+// TestServerGlobalBudget verifies the across-all-sources budget (G4):
+// per-source budgets cannot cap a flood of many distinct spoofed sources, so
+// the global pps budget bounds total relay work.
+func TestServerGlobalBudget(t *testing.T) {
+	cfg := Config{
+		Addr:             &net.UDPAddr{IP: net.ParseIP("127.0.0.1")},
+		MaxPPS:           -1, // per-source disabled; only the global budget bites
+		MaxBytesPS:       -1,
+		NameQuotaBytes:   -1,
+		GlobalMaxPPS:     3,
+		GlobalMaxBytesPS: -1,
+	}
+	srv, err := New(cfg)
+	if err != nil {
+		t.Fatalf("relay.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.Run(ctx)
+
+	relayAddr := srv.Addr()
+	x := dialConn(t, "127.0.0.1:0")
+	y := dialConn(t, "127.0.0.1:0")
+
+	reg, err := WrapPacket("y", "who", []byte("reg"))
+	if err != nil {
+		t.Fatalf("WrapPacket: %v", err)
+	}
+	if _, err := y.WriteToUDP(reg, relayAddr); err != nil {
+		t.Fatalf("register y: %v", err)
+	}
+
+	// A burst of eight frames from x: the per-source budget is disabled, so
+	// only the global cap can stop the flood. The y registration above already
+	// consumed one datagram from the global budget.
+	for i := 0; i < 8; i++ {
+		pp, err := WrapPacket("x", "y", []byte("flood"))
+		if err != nil {
+			t.Fatalf("WrapPacket: %v", err)
+		}
+		if _, err := x.WriteToUDP(pp, relayAddr); err != nil {
+			t.Fatalf("x write %d: %v", i, err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if inner(t, readFrom(t, y)) != "flood" {
+			t.Fatalf("delivery %d mismatch", i)
+		}
+	}
+	expectNoData(t, y, 300*time.Millisecond)
+
+	st := srv.Stats()
+	if st.Forwarded != 2 {
+		t.Fatalf("Forwarded = %d, want 2", st.Forwarded)
+	}
+	if st.RateLimited != 6 {
+		t.Fatalf("RateLimited = %d, want 6", st.RateLimited)
+	}
+}
+
 // TestServerNameQuota verifies the per-destination-name byte quota (G4):
 // beyond the configured bytes/second a destination stops receiving, so one
 // name cannot balloon relay bandwidth.

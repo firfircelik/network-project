@@ -16,9 +16,15 @@ import (
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:19205", "UDP address to listen on")
+	globalMaxPPS := flag.Int("global-max-pps", 0, "aggregate datagrams/sec across all sources (0 = config default 5000, negative disables)")
+	globalMaxBytesPS := flag.Int("global-max-bytes-ps", 0, "aggregate forwarded bytes/sec across all sources (0 = config default 8MiB, negative disables)")
 	flag.Parse()
 
-	srv, err := relay.New(relay.Config{Addr: mustUDPAddr(*addr)})
+	srv, err := relay.New(relay.Config{
+		Addr:             mustUDPAddr(*addr),
+		GlobalMaxPPS:     *globalMaxPPS,
+		GlobalMaxBytesPS: *globalMaxBytesPS,
+	})
 	if err != nil {
 		log.Fatalf("relay: %v", err)
 	}

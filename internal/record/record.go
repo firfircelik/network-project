@@ -47,7 +47,14 @@ var (
 // Frame builds a single frame for the given type and payload:
 //
 //	[1B type][2B length BE][payload]
+//
+// Payloads longer than maxPayloadLen cannot be represented by the uint16
+// length field; such a call is a programming error, so it panics instead of
+// silently emitting a wrapping, unusable frame.
 func Frame(t byte, payload []byte) []byte {
+	if len(payload) > maxPayloadLen {
+		panic(fmt.Sprintf("record: payload of %d bytes exceeds the %d-byte frame ceiling", len(payload), maxPayloadLen))
+	}
 	frame := make([]byte, HeaderLen+len(payload))
 	frame[0] = t
 	binary.BigEndian.PutUint16(frame[1:3], uint16(len(payload)))

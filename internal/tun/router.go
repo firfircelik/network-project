@@ -59,11 +59,13 @@ func (r *Router) RoutePacket(pkt []byte) bool {
 	_, dst, ok := parseIPv4(pkt)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.PktsIn++
 	if !ok {
+		// Malformed/truncated datagrams are not counted as offered traffic;
+		// they are noise and only bump the drop counter.
 		r.PktsDropped++
 		return false
 	}
+	r.PktsIn++
 	sink, ok := r.routes[dst]
 	if !ok {
 		r.PktsDropped++

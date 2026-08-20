@@ -120,10 +120,14 @@ func Accept(conn net.Conn, myKP *noisework.Keypair) (peerStatic []byte, c *Conn,
 	return sess.PeerStatic(), &Conn{nc: conn, br: br, sess: sess}, nil
 }
 
-// WriteMsg encrypts and writes one control message. A single write lock
-// prevents concurrent writers (both directions' broadcasters) from
-// interleaving the length header and its ciphertext on a shared connection.
+// WriteMsg encrypts and writes one control message. The whole operation runs
+// under a single lock: encryption mutates the Noise cipher state (the AEAD
+// nonce counter), so two concurrent writers MUST NOT encrypt concurrently or
+// the same key+nonce would be used twice. The lock also stops broadcasters
+// from interleaving the 4-byte length header with its ciphertext.
 func (c *Conn) WriteMsg(plaintext []byte) error {
+	c.wm.Lock()
+	defer c.wm.Unlock()
 	ct, err := c.sess.Encrypt(plaintext)
 	if err != nil {
 		return fmt.Errorf("control: encrypt: %w", err)
@@ -131,9 +135,6 @@ func (c *Conn) WriteMsg(plaintext []byte) error {
 	msg := make([]byte, 4+len(ct))
 	binary.BigEndian.PutUint32(msg[:4], uint32(len(ct)))
 	copy(msg[4:], ct)
-
-	c.wm.Lock()
-	defer c.wm.Unlock()
 	_ = c.nc.SetWriteDeadline(time.Now().Add(writeDeadline))
 	_, err = c.nc.Write(msg)
 	return err
@@ -154,6 +155,15 @@ func (c *Conn) ReadMsg() ([]byte, error) {
 		return nil, err
 	}
 	return c.sess.Decrypt(buf)
+}
+
+// Conn returns the underlying network connection, so callers can re-arm
+// read deadlines between messages without a separate accessor.
+func (c *Conn) NetConn() net.Conn {
+	if c == nil {
+		return nil
+	}
+	return c.nc
 }
 
 // Close closes the underlying socket.
