@@ -1,29 +1,31 @@
-# meshlink — Tehdit Modeli (v0.x → v1.0)
+# meshlink — Threat Model (v0.x → v1.0)
 
-Tarih: 2026-08-19
-Doküman, MVP'den production gerçekçiliğine geçişin temel taşıdır. Mevcut kod bir
-**demo/MVP'dir**; bu model, hangi kontrollerin eksik olduğunu açıkça listeler.
+Date: 2026-08-19
+This document is the cornerstone of the transition from MVP to production
+realism. The current code is a **demo/MVP**; this model explicitly lists which
+controls are missing.
 
 ---
 
-## 1. Kapsam ve Varlıklar
+## 1. Scope and Assets
 
-Sistem dört bileşenden oluşur: **agent** (istemci), **coordinator** (kontrol
-düzlemi: kayıt + STUN), **relay** (veri düzlemi aktarımı) ve isteğe bağlı
-**TUN köprüsü** (gerçek IP veri taşıma, root gerektirir). Demo ayrıca gerçek
-NAT cihazlarını taklit eden **natbox** içerir — production'da yoktur.
+The system consists of four components: **agent** (client), **coordinator**
+(control plane: registration + STUN), **relay** (data plane transport) and the
+optional **TUN bridge** (real IP data transport, requires root). The demo also
+includes **natbox**, which mimics real NAT devices — it is not present in
+production.
 
-Varlıklar:
+Assets:
 
-| Varlık | Gizlilik | Bütünlük | Kullanılabilirlik |
+| Asset | Confidentiality | Integrity | Availability |
 |---|---|---|---|
-| Agent X25519 statik anahtarı | Yüksek | Yüksek | — |
-| Oturum verileri (uçtan uca plaintext) | Yüksek | Yüksek | Orta |
-| Koordinatör kayıt defteri (isim→anahtar, endpoint) | Orta | Yüksek | Yüksek |
-| Relay ileti akışı | Orta (yön/kimlik metadata) | Yüksek | Yüksek |
-| STUN yanıtları (XOR-MAPPED-ADDRESS) | Düşük | Yüksek | Düşük |
+| Agent X25519 static key | High | High | — |
+| Session data (end-to-end plaintext) | High | High | Medium |
+| Coordinator registry (name→key, endpoint) | Medium | High | High |
+| Relay message flow | Medium (direction/identity metadata) | High | High |
+| STUN responses (XOR-MAPPED-ADDRESS) | Low | High | Low |
 
-## 2. Güven Sınırları
+## 2. Trust Boundaries
 
 ```
  [güvenilir]                   [yarı güvenilir / ağa düşman]          [güvenilir]
@@ -32,95 +34,97 @@ Varlıklar:
      └─────Noise (E2E)──▶ relay (ciphertext only) ◀──Noise──────┘
 ```
 
-- **Agent çekirdeği** tam güvenilir; **koordinatör ve relay** "ağa maruz,
-  aktarım kutsal" (Noise E2E olduğu için veriyi göremezler).
-- **Ağ yolu** (internet/NAT'lar) tamamen düşman kabul edilir.
-- **natbox** demo artefaktıdır; production güven sınırı çizilmez.
-- Kontrol kanalı artık Noise-auth'ludur; koordinatörün gerçekliği istemcide
-  sabitlenmiş anahtar üzerinden doğrulanır (Faz 3).
+- **Agent core** is fully trusted; **coordinator and relay** are "network-exposed,
+  transport is sacred" (they cannot see the data because Noise is E2E).
+- The **network path** (internet/NATs) is considered entirely hostile.
+- **natbox** is a demo artifact; no production trust boundary is drawn around it.
+- The control channel is now Noise-authenticated; the coordinator's authenticity
+  is verified at the client via a pinned key (Phase 3).
 
-## 3. Tehditler (STRIDE)
+## 3. Threats (STRIDE)
 
-### 3.1 T1 — İmtiyazsız ağ saldırganı (veri hattı)
-- **Replay:** kaydedilen DATA ciphertext'inin yeniden iletimi. Alıcıdaki
-  WireGuard tarzı kayar pencere (2048) eski nonce'ları ve tekrarları reddeder
-  → **azaltılmış** (Faz 2).
-- **UDP DoS/reflection:** relay'e isim iddia ederek amplification; kaynak
-  adresi sahte paketler. İsim→adres pinleme + kaynak-başına pps/byte limiti +
-  isim başına kota aktiftir → **azaltılmış** (Faz 3).
-- **Handshake flood:** HS1 ile CPU tüketimi (her istek yeni handshake durumu).
-  Responder'da eşzamanlı handshake budget'ı + handshake timeout'u vardır →
-  **azaltılmış** (Faz 3).
-- **STUN sahteleme:** yanlış endpoint enjekte etme — txid doğrulaması var ve
-  key verifikasyonu oturumu kurtarır → **azaltılmış**.
+### 3.1 T1 — Unprivileged network attacker (data path)
+- **Replay:** re-transmission of recorded DATA ciphertext. The WireGuard-style
+  sliding window (2048) at the receiver rejects old nonces and duplicates
+  → **mitigated** (Phase 2).
+- **UDP DoS/reflection:** amplification by claiming a name to the relay; packets
+  with spoofed source addresses. Name→address pinning + per-source pps/byte
+  limits + per-name quota are active → **mitigated** (Phase 3).
+- **Handshake flood:** CPU exhaustion via HS1 (each request creates new handshake
+  state). The responder has a concurrent handshake budget + handshake timeout →
+  **mitigated** (Phase 3).
+- **STUN spoofing:** injecting a wrong endpoint — txid verification exists and
+  key verification recovers the session → **mitigated**.
 
-### 3.2 T2 — Rogue agent (kayıt olabilen kötü niyetli istemci)
-- **İsim kaçırma:** meşru "a"dan önce "a" adıyla kayıt olup ping'i engelleme.
-  Anahtar pinleme + koordinatörde kimlik/anahtar uyuşmazlığı reddi →
-  **azaltılmış** (Faz 3).
-- **Sahte relay iddiası:** relay'e başkasının srcID'si ile paket gönderme.
-  İsim→adres pinleme bunu engeller → **azaltılmış** (Faz 3, eski M1 kapanır).
-- **Dolu endpoint ile yanlış yönlendirme:** koordinatörü kötü endpoint ile
-  spam'leme; diğer agent'lar handshake'te anahtarı doğrular ama yanlış adrese
-  probe atar → **kısmi azaltılmış** (kontrol kanalı Noise-auth'ludur, kayıt
-  değişimi artık şifresiz ağda mümkün değildir).
+### 3.2 T2 — Rogue agent (malicious client that can register)
+- **Name hijacking:** registering the name "a" before the legitimate "a" and
+  blocking the ping. Key pinning + rejection of identity/key mismatch at the
+  coordinator → **mitigated** (Phase 3).
+- **Fake relay claim:** sending packets to the relay with someone else's srcID.
+  Name→address pinning prevents this → **mitigated** (Phase 3, old M1 closes).
+- **Misdirection with bogus endpoint:** spamming the coordinator with a bad
+  endpoint; other agents verify the key during the handshake but probe the wrong
+  address → **partially mitigated** (the control channel is Noise-authenticated,
+  registration changes are no longer possible on the unencrypted network).
 
-### 3.3 T3 — Koordinatör / relay operator saldırganı
-- Kontrol kanalı şifresiz/TLS'sizdi → Noise-auth'lı kontrol kanalı +
-  koordinatör pubkey sabitleme ile kapatıldı → **azaltılmış** (Faz 3).
-- Relay, isim→adres tablosunu tutar; bir operator aboneyi değiştirebilir veya
-  akışı izleyebilir (metadata: kim kime hangi saatte). E2E Noise bunu düzeltmez;
-  metadata gizliliği ayrı bir gereksinimdir → **belgeli kabul**.
+### 3.3 T3 — Coordinator / relay operator attacker
+- The control channel was unencrypted/TLS-less → closed with a Noise-authenticated
+  control channel + coordinator pubkey pinning → **mitigated** (Phase 3).
+- The relay keeps the name→address table; an operator can swap a subscriber or
+  observe the flow (metadata: who talks to whom at what time). E2E Noise does not
+  fix this; metadata privacy is a separate requirement → **documented acceptance**.
 
-### 3.4 T4 — Yerel işletim
-- Anahtar dosyası: `0600` perms **iyi**; ancak düz metin privkey → disk
-  şifreleme/KMS production gereksinimi.
-- Memory dump / core dump'ta anahtar + plaintext → production'da mlock/guard
-  düşünülmeli (v1 sonrası).
+### 3.4 T4 — Local operation
+- Key file: `0600` perms are **good**; however plaintext privkey → disk
+  encryption/KMS is a production requirement.
+- Key + plaintext in memory dump / core dump → mlock/guard should be considered
+  in production (post-v1).
 
-## 4. Mevcut Azaltımlar (yapılmış)
+## 4. Current Mitigations (implemented)
 
-- Noise XX + DH25519 + ChaCha20-Poly1305 + SHA256; iki taraflı statik anahtar
-  doğrulaması (koordinatör dağıtımlı pubkey ile, opsiyonel).
-- Anahtar pinleme: koordinatör aynı isim+farklı anahtar kaydını reddeder;
-  relay isim→adres pinlemesi teslimat bozmayı engeller.
-- Kontrol kanalı Noise-auth: kayıt/denetim trafiği şifreli, el değiştirilemez.
-- Veri düzlemi: kayar pencere (2048) replay reddi, periyodik rekey, nonce
-  tükenme guard'ı + `maxEpochJump` DoS kapağı, oturum yaş sınırı.
-- Relay rate-limit/kota (kaynak başına pps/byte, isim başına kota);
-  handshake budget + timeout (relay ve kontrol).
-- STUN txid doğrulaması.
-- İletişimde boyut limitleri (kontrol `maxMsgLen`, relay/nat zarfı), frame
-  geçerlilik denetimi.
-- Datagram boyut sözleşmesi (65507-3-16 plaintext tavanı, relay yolu ayrıca
-  daraltılır).
-- Koordinatör broadcast write deadline; sınırlı kontrol okuma.
-- `-race` temiz birim testleri; parser fuzz'ları; uçtan uca demo; CI workflow.
+- Noise XX + DH25519 + ChaCha20-Poly1305 + SHA256; two-way static key
+  verification (with coordinator-distributed pubkey, optional).
+- Key pinning: the coordinator rejects a registration with the same name + a
+  different key; relay name→address pinning prevents delivery disruption.
+- Noise-authenticated control channel: registration/control traffic is encrypted
+  and cannot be swapped.
+- Data plane: sliding window (2048) replay rejection, periodic rekey, nonce
+  exhaustion guard + `maxEpochJump` DoS cap, session age limit.
+- Relay rate-limit/quota (per-source pps/byte, per-name quota); handshake budget
+  + timeout (relay and control).
+- STUN txid verification.
+- Size limits in communication (control `maxMsgLen`, relay/nat envelope), frame
+  validity checking.
+- Datagram size contract (65507-3-16 plaintext ceiling, the relay path is
+  additionally tightened).
+- Coordinator broadcast write deadline; bounded control reads.
+- `-race`-clean unit tests; parser fuzzers; end-to-end demo; CI workflow.
 
-## 5. Bilinen Açıklar (production engelleri)
+## 5. Known Gaps (production blockers)
 
-| # | Açık | Etki | Durum |
+| # | Gap | Impact | Status |
 |---|---|---|---|
-| G1 | — (replay pencere + rekey) | — | ✅ Faz 2 |
-| G2 | — (relay isim pinleme) | — | ✅ Faz 3 |
-| G3 | — (kontrol Noise-auth) | — | ✅ Faz 3 |
-| G4 | — (relay rate-limit/kota) | — | ✅ Faz 3 |
-| G5 | — (handshake budget/timeout) | — | ✅ Faz 3 |
-| G6 | TUN yaşam döngüsü + gerçek ağ doğrulaması | VPN kullanımı için gerçek ağ NAT testi açık | 🔶 Faz 4 kısmi |
-| G7 | — (fuzz, CI, sağlık logları) | — | ✅ Faz 1 |
-| G8 | — (rekey, replay pencere) | — | ✅ Faz 2 |
-| G9 | Ortam değişkeni config; metrik/Prometheus | Operasyonel tahmin edilebilirlik | 🔶 v1.1+ |
+| G1 | — (replay window + rekey) | — | ✅ Phase 2 |
+| G2 | — (relay name pinning) | — | ✅ Phase 3 |
+| G3 | — (control Noise-auth) | — | ✅ Phase 3 |
+| G4 | — (relay rate-limit/quota) | — | ✅ Phase 3 |
+| G5 | — (handshake budget/timeout) | — | ✅ Phase 3 |
+| G6 | TUN lifecycle + real-network verification | Real-network NAT testing for VPN use is open | 🔶 Phase 4 partial |
+| G7 | — (fuzz, CI, health logs) | — | ✅ Phase 1 |
+| G8 | — (rekey, replay window) | — | ✅ Phase 2 |
+| G9 | Environment-variable config; metrics/Prometheus | Operational predictability | 🔶 v1.1+ |
 
-## 6. Kabul Edilen Riskler (MVP)
+## 6. Accepted Risks (MVP)
 
-- **Kontrol düzlemi metadata güveni:** koordinatör/relay operatorunun
-  "kim kime ne zaman" bilgisini görmesi, E2E şifrelemeye rağmen kabul edilir.
-- **Koşutluk / DTLS:** UDP veri düzlemi DTLS kullanmaz; enerji/metadata
-  analizi teorik olarak mümkündür (WireGuard modeli kabulü).
-- **natbox simülasyonu** gerçek internet NAT çeşitliliğini (Cone/Cone,
-  carrier-grade vs.) göstermez; gerçek ağ testi Faz 4 kalıntısıdır.
+- **Control-plane metadata trust:** the coordinator/relay operator seeing
+  "who talks to whom when" information is accepted despite E2E encryption.
+- **Parallelism / DTLS:** the UDP data plane does not use DTLS; energy/metadata
+  analysis is theoretically possible (WireGuard model acceptance).
+- The **natbox simulation** does not cover the diversity of real internet NATs
+  (Cone/Cone, carrier-grade, etc.); real-network testing is a Phase 4 leftover.
 
-## 7. Kapama Kontrolleri (roadmap eşlemesi)
+## 7. Closure Controls (roadmap mapping)
 
-Faz 1 → G7, G9; Faz 2 → G1, G8; Faz 3 → G2–G5; Faz 4 → G6.
-Her faz sonunda test + dokümantasyon güncellenir; bu tablo da güncellenir.
+Phase 1 → G7, G9; Phase 2 → G1, G8; Phase 3 → G2–G5; Phase 4 → G6.
+At the end of each phase, tests + documentation are updated; this table is
+updated as well.

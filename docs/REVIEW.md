@@ -1,33 +1,33 @@
-# meshlink — Kod İnceleme Raporu
+# meshlink — Code Review Report
 
-Tarih: 2026-08-19 · Kapsam: tüm kaynak, testler, dokümantasyon, Makefile, demo script.
-Yöntem: 5 eksenli inceleme + `gofmt` / `go vet` / `go test -race` / `make demo` canlı doğrulama.
+Date: 2026-08-19 · Scope: all source, tests, documentation, Makefile, demo script.
+Method: 5-axis review + live verification via `gofmt` / `go vet` / `go test -race` / `make demo`.
 
 ---
 
-## Durum
+## Status
 
-| Madde | Önem | Durum |
+| Item | Severity | Status |
 |---|---|---|
-| H1 — `Peer.Run` `p.done` izlemiyordu → goroutine sızıntısı | Yüksek | ✅ Çözüldü + regresyon testi |
-| H2 — Restricted NAT `contactIP` birikmiyordu | Yüksek | ✅ Çözüldü + çoklu-hedef testi |
-| H3 — Koordinatör ID→pubkey pinleme yoktu | Orta/güvenlik | ✅ Çözüldü + test |
-| M1 — Relay kaynak adı doğrulamasız | Orta/güvenlik | ✅ Çözüldü (Faz 3: isim→adres pinleme) + test |
-| M2 — `MaxPlaintextLen` UDP sınırını aşıyordu | Orta | ✅ Çözüldü (65504; relay yolu ayrıca daraltılır) |
-| M3 — `scripts/demo.sh` executable değildi | Orta | ✅ `chmod +x` |
-| M4 — README eski natbox flag'leri | Orta | ✅ Güncellendi |
-| M5 — `disco.MaxPunchAttempts` ölü sabit + SPEC "max 10" | Orta | ✅ Kaldırıldı / belgelendi |
-| D1 — nat `wg.Add`/`Wait` eşzamanlılığı | Düşük | ✅ `closed` guard |
-| D2 — Ping özet path'i koşu başında alınıyordu | Düşük | ✅ Koşu sonunda okunuyor |
-| D3 — Kontrol conn. write deadline yok | Düşük | ✅ `broadcastWriteDeadline` + write mutex |
-| D4 — Ping gönderim hatası gizleniyordu | Düşük | ✅ Loglanıyor |
-| D5 — JSON çözme hatası sessizdi | Düşük | ✅ Loglanıyor |
-| D6 — `nat.decodeOutbound` üretimdeki test-shim'i | Düşük | ✅ Test dosyasına taşındı |
-| D7 — `go.mod` `// indirect` yorumları | Düşük | ✅ `go mod tidy` |
-| D8 — `receiveLoop` her pakette kopya | Düşük | ✅ Yalnız eşleşen frame kopyalanıyor |
-| Bonus | — | ✅ Ölü `peer.maxPlaintext()` kaldırıldı |
+| H1 — `Peer.Run` didn't watch `p.done` → goroutine leak | High | ✅ Fixed + regression test |
+| H2 — Restricted NAT `contactIP` wasn't accumulating | High | ✅ Fixed + multi-target test |
+| H3 — No coordinator ID→pubkey pinning | Medium/security | ✅ Fixed + test |
+| M1 — Relay source name unverified | Medium/security | ✅ Fixed (Phase 3: name→address pinning) + test |
+| M2 — `MaxPlaintextLen` exceeded the UDP limit | Medium | ✅ Fixed (65504; relay path further narrowed) |
+| M3 — `scripts/demo.sh` wasn't executable | Medium | ✅ `chmod +x` |
+| M4 — README stale natbox flags | Medium | ✅ Updated |
+| M5 — `disco.MaxPunchAttempts` dead constant + SPEC "max 10" | Medium | ✅ Removed / documented |
+| D1 — nat `wg.Add`/`Wait` concurrency | Low | ✅ `closed` guard |
+| D2 — Ping summary path captured at run start | Low | ✅ Read at end of run |
+| D3 — Control conn. has no write deadline | Low | ✅ `broadcastWriteDeadline` + write mutex |
+| D4 — Ping send error was being swallowed | Low | ✅ Logged |
+| D5 — JSON decoding error was silent | Low | ✅ Logged |
+| D6 — `nat.decodeOutbound` test shim in production | Low | ✅ Moved to test file |
+| D7 — `go.mod` `// indirect` comments | Low | ✅ `go mod tidy` |
+| D8 — `receiveLoop` copy on every packet | Low | ✅ Only matching frame is copied |
+| Bonus | — | ✅ Dead `peer.maxPlaintext()` removed |
 
-## Doğrulama
+## Verification
 
 ```
 gofmt -l .                → boş
@@ -39,80 +39,80 @@ make demo                 → phase 1 path=direct PASS · phase 2 path=relay PAS
 
 ---
 
-## Önceki Oturum Bulguları ve Çözüm Detayları
+## Previous Session Findings and Resolution Details
 
-### H1 — `Peer.Run` `p.done`'u izlemiyor (goroutine sızıntısı)
-`internal/peer/peer.go` — `Run` yalnızca `ctx.Done()` bekliyordu; `Close()` ile
-kapatılan `p.done` döngüde izlenmiyordu ve `p.recv` hiç kapanmıyordu (`applyPeers`
-prune'u sonsuza dek sızdıran iki goroutine). Çözüm:
+### H1 — `Peer.Run` doesn't watch `p.done` (goroutine leak)
+`internal/peer/peer.go` — `Run` only waited on `ctx.Done()`; the `p.done` closed by
+`Close()` wasn't watched in the loop and `p.recv` never closed (two goroutines
+leaking the `applyPeers` prune forever). Fix:
 
-- `p.done` artık `doneOnce sync.Once` ile yalnızca bir kez kapanıyor.
-- `Run`'ın defer'i `recv`'i kilit altında (eşzamanlı send race olmadan) kapatıyor.
-- `onData` kilit altında, `closed`/`recvClosed` guard'lı, seçmeli (non-blocking) send yapıyor.
-- Regresyon testi: `internal/peer/peer_test.go` (`TestRunExitsWhenClosed`,
+- `p.done` now closes exactly once via `doneOnce sync.Once`.
+- `Run`'s defer closes `recv` under lock (no concurrent-send race).
+- `onData` does a guarded (`closed`/`recvClosed`), non-blocking send under lock.
+- Regression test: `internal/peer/peer_test.go` (`TestRunExitsWhenClosed`,
   `TestRunExitsOnCancel`, `TestNoDataAfterClose`).
 
-### H2 — Restricted NAT `contactIP` birikimi
-`internal/nat/nat.go` — Mapping refresh dalında
-`e.contactIP[ipKey(dst.IP)] = true` eksikti; host sonradan temas ettiği IP'lerden
-gelen inbound'u yanlış DROP ediyordu. Regresyon testi:
+### H2 — Restricted NAT `contactIP` accumulation
+`internal/nat/nat.go` — `e.contactIP[ipKey(dst.IP)] = true` was missing in the
+mapping-refresh branch; the host was wrongly DROPping inbound traffic from IPs
+it had later contacted. Regression test:
 `internal/nat/nat_test.go` → `TestAddressRestrictedMultiTarget`.
 
-### H3 — Koordinatör anahtar pinleme
-`internal/coordinator/coordinator.go` — Aynı ID ile farklı `PubKey` gelirse
-TypeError (kayıt ezilmiyor); boş pubkey reddediliyor; aynı anahtarla yeniden
-kayıt (endpoint tazeleme) hâlâ serbest. Regresyon testi:
-`TestRegistrationKeyPinning`.
+### H3 — Coordinator key pinning
+`internal/coordinator/coordinator.go` — A different `PubKey` with the same ID
+raises a TypeError (registration isn't overwritten); an empty pubkey is
+rejected; re-registration with the same key (endpoint refresh) remains free.
+Regression test: `TestRegistrationKeyPinning`.
 
-### M2 — Datagram boyutu sözleşmesi
+### M2 — Datagram size contract
 - `internal/noisework/noisework.go`: `maxPlaintextLen = 65507 - 3 - 16 = 65504`
-  (25535 − IP(20) − UDP(8) başlıkları; frame hdr 3; AEAD tag 16).
-- `internal/relay/relay.go`: `MaxHeaderLen` dışa açıldı (en kötü senaryo 133 B).
-- `internal/peer/peer.go`: relay yolunda `Send` sınırı `MaxPlaintextLen - MaxHeaderLen`.
-- Test/SPEC/noisework_test uyarlaması yapıldı; `record`'un 65535 kodlama
-  sözleşmesi (tek paket değil, codec sınırı) korundu.
+  (25535 − IP(20) − UDP(8) headers; frame hdr 3; AEAD tag 16).
+- `internal/relay/relay.go`: `MaxHeaderLen` exported (worst case 133 B).
+- `internal/peer/peer.go`: `Send` limit on the relay path is `MaxPlaintextLen - MaxHeaderLen`.
+- Test/SPEC/noisework_test adapted; `record`'s 65535 encoding contract (a codec
+  limit, not a single packet) preserved.
 
-### D8 — `receiveLoop` tahsis azaltımı
-`internal/agent/agent.go` — Ayrılmış frame kopyası yalnızca eşleşen frame için
-yapılıyor; eşleşmeyen (boşta atılan) datagramlar paylaşılan tampondan kopyasız
-düşürülüyor. Relay demux yine peer ID üzerinden.
-
----
-
-## Faz 3/4 Oturumu Ek Bulguları
-
-### D9 — Eşzamanlı kontrol yazıcıları frame bozabiliyordu (Yüksek)
-`internal/control` — İki `handleClient` aynı istemci `*control.Conn`'una
-(broadcast + kişisel yanıt) eşzamanlı yazabiliyordu; `WriteMsg` iki ayrı
-`Write` çağrısı (uzunluk başlığı + ciphertext) yaptığından `-race` altında
-çerçeveleme bozulabiliyordu. Çözüm: `Conn.wm sync.Mutex` + tek buffer'lık
-atomik yazma. `TestRegistrationAndBroadcast` deterministik sıraya alındı.
-
-### D10 — Kontrol handshake timeout'u yoktu (Orta)
-`internal/control` — `Initiate`/`Accept` bir `handshakeTimeout` ile
-sınırlanmadığı için asılmış akranlar acceptor'ı kilitleyebiliyordu. Çözüm:
-`SetDeadline(handshakeTimeout)` girişte, temizlenme başarı sonrası.
-`TestWrongCoordinatorKey` artık client tarafında deterministik olarak dönüyor.
-
-### Y1 — TUN köprüsü (Faz 4 / G6, kısmi)
-`internal/tun` (utun/TUN açma, `Router` IPv4 yönlendirme, `BufferDevice`) +
-`internal/agent/tunbridge.go` (aygıt ⇄ peer oturum köprüsü, `-tun`/`-tun-ip`/
-`-tun-peer`). Root'suz birim testler: `internal/tun/tun_test.go`,
-`internal/agent/tunbridge_test.go`. Gerçek aygıt açılışı testte `t.Skip` ile
-atlanır; gerçek ağ doğrulaması Faz 4 kalıntısıdır (docs/TUN.md).
+### D8 — `receiveLoop` allocation reduction
+`internal/agent/agent.go` — A dedicated frame copy is made only for the matching
+frame; non-matching (idle-dropped) datagrams are dropped without copying from
+the shared buffer. Relay demux is still by peer ID.
 
 ---
 
-## Test Kapsamı Değerlendirmesi
+## Phase 3/4 Session Additional Findings
 
-Mevcut: record, noisework, stun, nat, relay, coordinator, protocol, peer,
-control, tun, agent (tun köprüsü) — çok iyi. Fuzz'lar: record, relay, nat,
-stun, protocol. Açık (v1.1): gerçek internet NAT doğrulaması; TUN yaşam döngüsü
-canlı e2e (root gerektirir).
+### D9 — Concurrent control writers could corrupt frames (High)
+`internal/control` — Two `handleClient` instances could write concurrently to
+the same client `*control.Conn` (broadcast + personal reply); since `WriteMsg`
+made two separate `Write` calls (length header + ciphertext), framing could
+corrupt under `-race`. Fix: `Conn.wm sync.Mutex` + atomic single-buffer write.
+`TestRegistrationAndBroadcast` was made deterministic in ordering.
 
-## Kapanış
+### D10 — Control handshake had no timeout (Medium)
+`internal/control` — Because `Initiate`/`Accept` weren't bounded by a
+`handshakeTimeout`, hung peers could lock the acceptor. Fix:
+`SetDeadline(handshakeTimeout)` at entry, cleared after success.
+`TestWrongCoordinatorKey` now returns deterministically on the client side.
 
-Rapordaki tüm uygulanabilir maddeler çözüldü ve doğrulama üç katmanlı yapıldı
-(birim test `-race`, `go vet`/`gofmt`, uçtan uca `make demo`). M1 (relay tarafı
-kimlik doğrulama) Faz 3'te kapatıldı; gerçek ağ testleri bilinçli olarak Faz 4
-kalıntısı olarak bırakıldı.
+### Y1 — TUN bridge (Phase 4 / G6, partial)
+`internal/tun` (utun/TUN opening, `Router` IPv4 forwarding, `BufferDevice`) +
+`internal/agent/tunbridge.go` (device ⇄ peer session bridge, `-tun`/`-tun-ip`/
+`-tun-peer`). Rootless unit tests: `internal/tun/tun_test.go`,
+`internal/agent/tunbridge_test.go`. Real device opening is skipped in tests via
+`t.Skip`; real network verification is a Phase 4 remnant (docs/TUN.md).
+
+---
+
+## Test Coverage Assessment
+
+Present: record, noisework, stun, nat, relay, coordinator, protocol, peer,
+control, tun, agent (tun bridge) — very good. Fuzzers: record, relay, nat,
+stun, protocol. Open (v1.1): real-internet NAT verification; live e2e TUN
+lifecycle (requires root).
+
+## Closing
+
+All applicable items in the report were resolved and verification was done in
+three layers (unit test `-race`, `go vet`/`gofmt`, end-to-end `make demo`). M1
+(relay-side authentication) was closed in Phase 3; real-network tests were
+intentionally left as a Phase 4 remnant.

@@ -1,21 +1,21 @@
-# meshlink — Gerçek İnternet NAT Doğrulaması (Faz 4 kalıntısı)
+# meshlink — Real-Internet NAT Verification (Phase 4 leftover)
 
-Demo, NAT davranışını `natbox` ile **simüle** eder (fullcone/restricted/
-symmetric). Doğrulamanın kapanması için aynı akışın **gerçek ağ üzerinde**
-çalıştığı gösterilmelidir:
+The demo **simulates** NAT behavior with `natbox` (fullcone/restricted/
+symmetric). To close out the verification, the same flow must be shown
+running over a **real network**:
 
-- **Doğrudan delik delme (path=direct)** en az bir cone/restricted çiftinde,
-- **Relay yedeği (path=relay)**, doğrudan yol başarısız olduğunda.
+- **Direct hole punching (path=direct)** on at least one cone/restricted pair,
+- **Relay fallback (path=relay)** when the direct path fails.
 
-Ayrıca TUN köprüsü root gerektiren gerçek e2e ile doğrulanır
-(`make tun-demo`, tek makinede).
+Also, the TUN bridge is verified with a real e2e that requires root
+(`make tun-demo`, on a single machine).
 
-## Kurulum — halka açık sunucu (koordinatör + relay)
+## Setup — public server (coordinator + relay)
 
-En kolay: ucuz bir VPS (bulut ~5$/ay) + istemci tarafında iki farklı ağ
-(ör. ev Wi-Fi + bir cep telefonundan tethering).
+Simplest: a cheap VPS (cloud ~$5/month) + two different networks on the client
+side (e.g. home Wi-Fi + tethering from a mobile phone).
 
-1. Sunucu ikililerini çapraz derle (linux/amd64):
+1. Cross-compile the server binaries (linux/amd64):
 
    ```sh
    make build
@@ -25,10 +25,10 @@ En kolay: ucuz bir VPS (bulut ~5$/ay) + istemci tarafında iki farklı ağ
    scp bin/linux/{coordinator,relay,agent} user@vps:/opt/meshlink/
    ```
 
-2. Güvenlik grubunda aç: TCP **19200**, UDP **19201**, UDP **19205** (0.0.0.0/0;
-   production'da kaynak kısıtlanır).
+2. Open in the security group: TCP **19200**, UDP **19201**, UDP **19205**
+   (0.0.0.0/0; restrict by source in production).
 
-3. Sunucuda çalıştır:
+3. Run on the server:
 
    ```sh
    # koordinatör: ilk çalıştırmada anahtarını üretir ve yazdırır
@@ -37,16 +37,16 @@ En kolay: ucuz bir VPS (bulut ~5$/ay) + istemci tarafında iki farklı ağ
    bin/relay -addr 0.0.0.0:19205
    ```
 
-   Çıktıdan `control public key ...: <hex>` anahtarını not al — bu **istemcilere**
-   `--coord-pubkey` olarak verilir.
+   Note the `control public key ...: <hex>` key from the output — this is
+   given to the **clients** as `--coord-pubkey`.
 
-## İstemciler — iki farklı ağda
+## Clients — on two different networks
 
-4. İstemci ikililerini derle (makineye göre): macOS için `GOOS=darwin
-   GOARCH=amd64` (veya `arm64`), Linux için `GOOS=linux`.
+4. Build the client binaries (per machine): for macOS `GOOS=darwin
+   GOARCH=amd64` (or `arm64`), for Linux `GOOS=linux`.
 
-5. Makine A'da (data soketini `0.0.0.0`'a bağla — STUN'un gerçek kaynak IP'yi
-   görmesi şart; `127.0.0.1`'e bağlanırsa delik açılamaz):
+5. On machine A (bind the data socket to `0.0.0.0` — STUN must see the real
+   source IP; if bound to `127.0.0.1`, no hole can be opened):
 
    ```sh
    bin/agent up --name a --keyfile key.a \
@@ -55,12 +55,13 @@ En kolay: ucuz bir VPS (bulut ~5$/ay) + istemci tarafında iki farklı ağ
      --data 0.0.0.0:19501
    ```
 
-   Doğrulama: logdaki `public endpoint (STUN)` satırı bir **halka açık** adres
-   göstermelidir (127.0.0.1 değil). Ev NAT'ı için bu, WAN IP'si olmalıdır.
+   Verification: the `public endpoint (STUN)` line in the log must show a
+   **public** address (not 127.0.0.1). For a home NAT, this should be the WAN
+   IP.
 
-6. Makine B'de aynı şekilde `--name b --data 0.0.0.0:19502` ile başlat.
+6. Start machine B the same way with `--name b --data 0.0.0.0:19502`.
 
-7. B'den koş:
+7. Run from B:
 
    ```sh
    bin/agent ping --name b --keyfile key.b --peer a \
@@ -69,21 +70,23 @@ En kolay: ucuz bir VPS (bulut ~5$/ay) + istemci tarafında iki farklı ağ
      --data 0.0.0.0:19502 --count 3 --interval 1s
    ```
 
-Beklenen sonuçlar:
+Expected results:
 
-| Senaryo | NAT'lar | Beklenen path |
+| Scenario | NATs | Expected path |
 |---|---|---|
-| İki ev/ADSL NAT'ı | fullcone / restricted | `direct` |
-| Tethering / mobil | symmetric (veya finans) | `relay` |
-| Karışık | restricted + symmetric | `relay` |
+| Two home/ADSL NATs | fullcone / restricted | `direct` |
+| Tethering / mobile | symmetric (or financial) | `relay` |
+| Mixed | restricted + symmetric | `relay` |
 
-`path=relay` görünüyorsa sistem **doğru çalışıyor** demektir — mobil NAT'larda
-delik açılamaz ve relay yedeği trafiği ayakta tutar. İki durum da Faz 4 için
-geçerli bir doğrulamadır: hangi path olursa olsun `received=count` olmalıdır.
+If `path=relay` appears, the system is **working correctly** — mobile NATs
+cannot be hole-punched and the relay fallback keeps the traffic up. Both cases
+are valid verification for Phase 4: whichever path is used, `received=count`
+must hold.
 
-## TUN'ı gerçek ağda kullanma
+## Using TUN on a real network
 
-Delik/relay yolu aynen çalışır; sadece her istemciye bir overlay adresi ver:
+The hole/relay path works exactly the same; just give each client an overlay
+address:
 
 ```sh
 # A tarafı
@@ -106,28 +109,28 @@ sudo ifconfig utun10 10.62.0.2/24 up
 ping -c 3 10.61.0.1
 ```
 
-(Linux'ta `/dev/net/tun` + `ip addr add ... dev meshlink0` kullanılır; ayrıntı
-ve macOS host-route notları `docs/TUN.md` içinde.)
+(On Linux, `/dev/net/tun` + `ip addr add ... dev meshlink0` is used; details
+and macOS host-route notes are in `docs/TUN.md`.)
 
-## Yerel ön doğrulama (root yeterli, VPS yok)
+## Local pre-verification (root is enough, no VPS)
 
 ```sh
 make tun-demo        # iki utun açar, host route'larla tünelden ICMP geçirir
 ```
 
-## Sorun giderme
+## Troubleshooting
 
-| Belirti | Olası neden | Çözüm |
+| Symptom | Possible cause | Fix |
 |---|---|---|
-| STUN endpoint `127.0.0.1` | `--data 127.0.0.1:...` kullanıldı | `--data 0.0.0.0:19501` |
-| Handshake timeout (control) | `--coord-pubkey` yanlış/eksik | Sunucu logundaki `<hex>`'i kopyala |
-| `ping`: hiç yanıt | 19200/19201/19205 kapalı | VPS güvenlik grubunu aç |
-| `path=relay` ama paket kaybı var | relay'den istemciye inbound UDP kapalı | A/B makinede yerel firewall'da 19501/19502'ye inbound UDP izin ver |
-| TUN ping %100 kayıp | `<peer>` overlay adresi tutarsız | `-tun-peer` iki tarafta simetrik olmalı |
+| STUN endpoint `127.0.0.1` | `--data 127.0.0.1:...` was used | `--data 0.0.0.0:19501` |
+| Handshake timeout (control) | `--coord-pubkey` wrong/missing | Copy the `<hex>` from the server log |
+| `ping`: no response | 19200/19201/19205 closed | Open the VPS security group |
+| `path=relay` but packet loss | inbound UDP from relay to client closed | Allow inbound UDP on 19501/19502 in the local firewall on machines A/B |
+| TUN ping 100% loss | `<peer>` overlay address inconsistent | `-tun-peer` must be symmetric on both sides |
 
-## Güvenlik notu
+## Security note
 
-Doğrulama için 0.0.0.0/0 açılır; sonrasında relay/koordinatör
-`docs/THREAT_MODEL.md` bölüm 6'daki "kabul edilen riskler" çerçevesinde
-beyaz listeye veya erişim kontrolüne alınmalıdır (relay rate-limit/imza
-pinleme zaten kodda aktiftir).
+0.0.0.0/0 is opened for verification; afterwards the relay/coordinator should
+be moved to a whitelist or access control under the "accepted risks" framework
+in section 6 of `docs/THREAT_MODEL.md` (relay rate-limiting/signature pinning
+is already active in the code).

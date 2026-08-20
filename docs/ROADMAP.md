@@ -1,63 +1,63 @@
-# meshlink — Production Yol Haritası (v1)
+# meshlink — Production Roadmap (v1)
 
-Mevcut durum: **Faz 1–3 tamamlandı; Faz 4 kısmi** (TUN kodu + dokümantasyon
-hazır; gerçek internet NAT testi açık). Faz sonlarında `gofmt` / `go vet` /
-`go test -race` / `make demo` yeşil tutulur.
+Current status: **Phase 1–3 complete; Phase 4 partial** (TUN code + documentation
+ready; real-internet NAT test open). At the end of each phase `gofmt` / `go vet` /
+`go test -race` / `make demo` are kept green.
 
-## Faz 1 — Güven/Kalite Altyapısı (hedef: G7, G9) — ✅ tamamlandı
+## Phase 1 — Trust/Quality Infrastructure (goal: G7, G9) — ✅ complete
 
 - ✅ GitHub Actions CI: `.github/workflows/ci.yml` — `gofmt`, `go vet`,
   `go test -race ./...`, `make demo`.
-- ✅ Fuzz testleri: `record`, `relay`, `nat`, `stun`, `protocol` çözücüleri
-  (düz bozuk giriş, truncation, uzunluk alanı abartısı) + `make fuzz-smoke`.
-- ✅ Sınırlı kontrol okuma: `control.ReadMsg` `maxMsgLen` tavanı, handshake
-  uzunlukları 16-bit tavan; bellek DoS yüzeyi kapatılır.
-- ✅ Yapılandırılmış günlük: `log/slog` (`level=INFO msg=...`), hata/uyarı/bilgi.
-- ✅ Config: flag doğrulaması (`--name`/`--keyfile`/`--coord-pubkey` zorunlu);
-  anahtar dosyası eksikken `0600` oluşturulur ve perms korunur.
-  (Ortam değişkeni tabanlı config → v1.1+.)
+- ✅ Fuzz tests: `record`, `relay`, `nat`, `stun`, `protocol` decoders
+  (plain malformed input, truncation, length-field exaggeration) + `make fuzz-smoke`.
+- ✅ Bounded control reads: `control.ReadMsg` `maxMsgLen` cap, handshake
+  lengths 16-bit cap; memory DoS surface closed.
+- ✅ Structured logging: `log/slog` (`level=INFO msg=...`), error/warning/info.
+- ✅ Config: flag validation (`--name`/`--keyfile`/`--coord-pubkey` required);
+  when the key file is missing it is created with `0600` and perms are preserved.
+  (Environment-variable-based config → v1.1+.)
 
-## Faz 2 — Tünel Çekirdeği Sağlamlaştırma (hedef: G1, G8) — ✅ tamamlandı
+## Phase 2 — Tunnel Core Hardening (goal: G1, G8) — ✅ complete
 
-- ✅ **Replay penceresi + kayıp toleransı:** DATA frame'lerinde açık 64-bit
-  nonce; alıcıda WireGuard tarzı kayar pencere (bitmap, 2048 paket). Çok eski
-  kayıtların/tekrarların reddi; kayıp sonrası oturum kilitlenmez
+- ✅ **Replay window + loss tolerance:** explicit 64-bit nonce in DATA frames;
+  WireGuard-style sliding window at the receiver (bitmap, 2048 packets). Very old
+  records/replays rejected; session does not lock up after loss
   (`internal/noisework`, `internal/peer`).
-- ✅ **Periyodik rekey:** `RekeyEvery` mesajda bir anahtar dönüşü; her iki
-  yön aynı sınırda, kayıp paketler epoch atlamalarıyla izlenir.
-- ✅ Nonce tükenme guard'ı (`MaxNonce`), `maxEpochJump` DoS kapağı ve oturum
-  yaş sınırı.
-- ✅ Test: bırakma, tekrar, sırasız geliş, eskimiş nonce, rekey arası boşluk
+- ✅ **Periodic rekey:** `RekeyEvery` message triggers a key rotation; both
+  directions at the same limit, lost packets tracked via epoch jumps.
+- ✅ Nonce exhaustion guard (`MaxNonce`), `maxEpochJump` DoS cap, and session
+  age limit.
+- ✅ Tests: drop, replay, out-of-order arrival, stale nonce, rekey gap
   (`TestDecryptAtLossReorderAndRekey`, `TestRekeyRotatesKeys`,
   `TestRekeyJumpCapped`).
 
-## Faz 3 — Kontrol + Relay Güvenliği (hedef: G2–G5) — ✅ tamamlandı
+## Phase 3 — Control + Relay Security (goal: G2–G5) — ✅ complete
 
-- ✅ **Relay isim pinleme:** bir isme bağlı ağ adresi değişirse başka
-  kanaldan sahiplenilemez (isim kaçırma/teslimat bozma kapatılır).
-- ✅ **Relay rate-limit/kota:** kaynak adresi başına pps/byte limiti + isim
-  başına kota; amplification yüzeyi daraltılır.
-- ✅ **Handshake/CPU budget + handshake timeout:** responder tarafında
-  eşzamanlı handshake durumu sınırı ve açık ele geçme/çürüme zaman aşımı
+- ✅ **Relay name pinning:** if the network address bound to a name changes, it
+  cannot be claimed from another channel (name hijacking/delivery disruption closed).
+- ✅ **Relay rate-limit/quota:** pps/byte limit per source address + quota per
+  name; amplification surface narrowed.
+- ✅ **Handshake/CPU budget + handshake timeout:** concurrent handshake state
+  limit on the responder side and explicit takeover/decay timeouts
   (relay + control).
-- ✅ **Kontrol düzlemi Noise-auth:** register kanalı Noise XX ile şifrelenir ve
-  koordinatör anahtarı istemcide sabitlenir; isim→anahtar bağlama koordinatör
-  tarafında doğrulanır (kimlik/anahtar eşleşmesi reddedilir).
+- ✅ **Control-plane Noise auth:** register channel encrypted with Noise XX and
+  the coordinator key pinned at the client; name→key binding verified on the
+  coordinator side (identity/key mismatches rejected).
 
-## Faz 4 — Gerçek Veri Taşıma (TUN) (hedef: G6) — 🔶 kısmi
+## Phase 4 — Real Data Transport (TUN) (goal: G6) — 🔶 partial
 
-- ✅ `internal/tun`: utun/TUN arabirimi açma, IPv4 yönlendirme (`Router`),
-  bellekte test aygıtı (`BufferDevice`); macOS `utun`, Linux `/dev/net/tun`.
-- ✅ Agent→tun köprüsü: `internal/agent/tunbridge.go` — şifreli oturum
-  verilerinin IP paketi olarak yönlendirilmesi (`-tun`, `-tun-ip`,
+- ✅ `internal/tun`: utun/TUN interface opening, IPv4 routing (`Router`),
+  in-memory test device (`BufferDevice`); macOS `utun`, Linux `/dev/net/tun`.
+- ✅ Agent→tun bridge: `internal/agent/tunbridge.go` — routing encrypted session
+  data as IP packets (`-tun`, `-tun-ip`,
   `-tun-peer id=ip`).
-- ✅ OS adres yapılandırma adımları (root gerektirir) → `docs/TUN.md`.
-- ⏸ Gerçek internet NAT testi (simülatörün ötesinde) — açık; gerçek ağda
-  doğrulama gerektirir.
+- ✅ OS address configuration steps (requires root) → `docs/TUN.md`.
+- ⏸ Real-internet NAT test (beyond the simulator) — open; requires validation
+  on a real network.
 
-## Sonraki adımlar (v1.1+)
+## Next steps (v1.1+)
 
-- Ortam değişkeni tabanlı config; gerçek internet NAT doğrulaması (Faz 4 kalıntısı).
-- Live config rotasyonu; kriptografik anahtar deposu/KMS; Prometheus metrikleri;
-  plaintext bellek koruması (mlock); WireGuard benzeri oturum timeout'ları;
-  handshake/çekirdek fonksiyon sağlık durumu.
+- Environment-variable-based config; real-internet NAT validation (Phase 4 leftover).
+- Live config rotation; cryptographic key store/KMS; Prometheus metrics;
+  plaintext memory protection (mlock); WireGuard-like session timeouts;
+  handshake/core function health status.

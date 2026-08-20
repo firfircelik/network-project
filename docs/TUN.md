@@ -1,20 +1,20 @@
-# meshlink TUN (Gerçek Veri Taşıma)
+# meshlink TUN (Real Data Transport)
 
-Faz 4 hedefi (G6): şifreli oturumların üzerinden gerçek IP trafiğini taşımak.
-`agent up` bir TUN arabirimi açar (macOS `utunN`, Linux `/dev/net/tun`),
-arabirimden okuduğu IP paketlerini overlay adres tablosuna göre doğru peer'ın
-şifreli oturumuna yönlendirir; peer'lardan gelen çözülmüş paketleri de
-arabirime yazar.
+Phase 4 goal (G6): carry real IP traffic over encrypted sessions.
+`agent up` opens a TUN interface (macOS `utunN`, Linux `/dev/net/tun`),
+routes the IP packets it reads from the interface to the correct peer's
+encrypted session according to the overlay address table; it also writes
+decrypted packets coming from peers to the interface.
 
-## Doğrulama
+## Verification
 
-- **Tek makine (root yeterli):** `make tun-demo` — tek makinede iki utun
-  + iki `agent up`, `-host`/`ip route` ile ICMP trafiği zorla tünelin
-  içinden geçirilir ve `ping 10.62.0.2` doğrulanır (scr: `scripts/tun-demo.sh`).
-- **Gerçek internet:** iki farklı ağdaki istemci + halka açık VPS üzerinde
-  koordinatör/relay → `docs/REALNET.md`.
+- **Single machine (root suffices):** `make tun-demo` — two utun
+  + two `agent up` on a single machine, ICMP traffic is forced through the
+  tunnel with `-host`/`ip route` and `ping 10.62.0.2` is verified (scr: `scripts/tun-demo.sh`).
+- **Real internet:** clients on two different networks + coordinator/relay
+  on a public VPS → `docs/REALNET.md`.
 
-## Mimari
+## Architecture
 
 ```
                     ┌──────────────────────────── agent ────────────────────────────┐
@@ -26,24 +26,24 @@ arabirime yazar.
                     └──────────────────────────────────────────────────────────────┘
 ```
 
-- `internal/tun`: TUN aygıt erişimi (`Device`) + IPv4 yönlendirme (`Router`)
-  + testler için bellekte aygıt (`BufferDevice`).
-- `internal/agent/tunbridge.go`: aygıt ile peer oturumları arasındaki köprü.
-- Overlay adres atamaları `-tun-peer <id>=<ip>` ile verilir; isim
-  koordinatörden öğrenildikçe rota takılır.
+- `internal/tun`: TUN device access (`Device`) + IPv4 routing (`Router`)
+  + an in-memory device for tests (`BufferDevice`).
+- `internal/agent/tunbridge.go`: the bridge between the device and peer sessions.
+- Overlay address assignments are given with `-tun-peer <id>=<ip>`; as the
+  name is learned from the coordinator, the route is installed.
 
-## macOS kurulum ve çalıştırma adımları (root gerektirir)
+## macOS setup and run steps (requires root)
 
-1. Derle ve koordinatörü başlat:
+1. Build and start the coordinator:
 
    ```sh
    make build
    bin/coordinator -keyfile bin/coord.key
    ```
 
-   Çıktıdaki `control public key ...: <hex>` değerini not al.
+   Note the `control public key ...: <hex>` value in the output.
 
-2. Agent "a" tarafı (utun9):
+2. Agent "a" side (utun9):
 
    ```sh
    bin/agent up --name a --keyfile bin/key.a \
@@ -53,7 +53,7 @@ arabirime yazar.
    sudo ifconfig utun9 10.60.0.1/24 up
    ```
 
-3. Agent "b" tarafı (utun10):
+3. Agent "b" side (utun10):
 
    ```sh
    bin/agent up --name b --keyfile bin/key.b \
@@ -66,14 +66,14 @@ arabirime yazar.
 4. Test:
 
    ```sh
-   ping -c 3 10.60.0.2   # a dizüstünde: b'ye giden ICMP tünelden geçer
+   ping -c 3 10.60.0.2   # on laptop a: ICMP to b passes through the tunnel
    ```
 
-## Linux kurulum ve çalıştırma adımları
+## Linux setup and run steps
 
-Aynı flag'ler; TUN aygıtı `internal/tun/tun_linux.go` üzerinden
-`/dev/net/tun` (IFF_TUN|IFF_NO_PI) kullanır. İsim boş bırakılırsa çekirdek
-`meshlink%d` ile serbest bir arabirim açar:
+Same flags; the TUN device uses `/dev/net/tun` (IFF_TUN|IFF_NO_PI) via
+`internal/tun/tun_linux.go`. If the name is left empty, the kernel opens a
+free interface as `meshlink%d`:
 
 ```sh
 sudo ip tuntap add dev meshlink0 mode tun
@@ -82,20 +82,21 @@ sudo ip addr add 10.60.0.1/24 dev meshlink0
 sudo ip link set meshlink0 up
 ```
 
-## Çapraz makine testi — Linux + macOS aynı LAN'da
+## Cross-machine test — Linux + macOS on the same LAN
 
-İki ayrı makine, iki ayrı OS, aynı ağ: agent'lar birbirini doğrudan delik
-açarak görür (`path=direct`) ve overlay üzerinden ping'leşir. Wire format tüm
-uzunluk alanlarında big-endian olduğu için platform farkı yoktur; yalnızca
-aygıt adı ve arayüz komutu OS'e özeldir. Route `/32`'ler burada da gereklidir —
-aksi halde kernel overlay hedefini default gateway üzerinden dener.
+Two separate machines, two separate OSes, same network: the agents see each
+other by direct hole punching (`path=direct`) and ping each other over the
+overlay. Since the wire format is big-endian in all length fields, there is
+no platform difference; only the device name and the interface command are
+OS-specific. Route `/32`s are also required here — otherwise the kernel
+tries the overlay destination via the default gateway.
 
-Mac (ör. `192.168.1.10`): koordinatör + relay + agent a
+Mac (e.g. `192.168.1.10`): coordinator + relay + agent a
 
 ```sh
 bin/coordinator -ctrl 0.0.0.0:19200 -stun 0.0.0.0:19201 -keyfile coord.key &
 bin/relay -addr 0.0.0.0:19205 &
-# çıktıdan <coord_pub_hex>'i oku
+# read <coord_pub_hex> from the output
 
 bin/agent up --name a --keyfile key.a \
   --coordinator 192.168.1.10:19200 --coord-pubkey <coord_pub_hex> \
@@ -107,7 +108,7 @@ sudo route add -host 10.62.0.2 -interface utun9
 ping -c 3 10.62.0.2
 ```
 
-Linux (ör. `192.168.1.20`): agent b
+Linux (e.g. `192.168.1.20`): agent b
 
 ```sh
 bin/agent up --name b --keyfile key.b \
@@ -121,17 +122,18 @@ sudo ip route add 10.61.0.1/32 dev meshlink_b
 ping -c 3 10.61.0.1
 ```
 
-Her iki tarafta da `ping` kayıpsız ve loglarda `public endpoint (STUN)` satırı
-karşı makinenin LAN IP'sini gösterirse **çapraz-platform mesh doğrulanmıştır
-(`path=direct`)**. Aynı tarif gerçek internet için de geçerlidir; tek fark
-koordinatör/relay'in halka açık bir VPS'te olması (`docs/REALNET.md`).
+On both sides, if `ping` is lossless and the `public endpoint (STUN)` line
+in the logs shows the other machine's LAN IP, **cross-platform mesh is
+verified (`path=direct`)**. The same recipe applies to the real internet;
+the only difference is that the coordinator/relay is on a public VPS
+(`docs/REALNET.md`).
 
-## Sınırlar ve ayrıntılar
+## Limits and details
 
-- Overlay adresleri statik `-tun-peer` tablosuyla yönetilir (WireGuard
-  `AllowedIPs` benzeri); dinamik tahsis "v1.1+" listesindedir.
-- Yönlendirme düz IPv4 içindir (L3 TUN); L2 (TAP)/IPv6 sonraki sürümde.
-- TUN erişimi root gerektirir; testler `BufferDevice` ile root'suz koşar,
-  gerçek aygıt açılışı yoksa test `t.Skip` ile atlanır.
-- Yönlendirme tablosunda olmayan hedefler sessizce düşer (`PktsDropped`);
-  `Pings/Routed/Dropped` sayaçları `Router` üzerinde tutulur.
+- Overlay addresses are managed with a static `-tun-peer` table (WireGuard
+  `AllowedIPs`-like); dynamic allocation is on the "v1.1+" list.
+- Routing is for plain IPv4 (L3 TUN); L2 (TAP)/IPv6 in a later version.
+- TUN access requires root; tests run rootless with `BufferDevice`, and if
+  no real device can be opened, the test is skipped with `t.Skip`.
+- Destinations not in the routing table are silently dropped (`PktsDropped`);
+  the `Pings/Routed/Dropped` counters are kept on `Router`.

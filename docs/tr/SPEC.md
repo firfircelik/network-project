@@ -1,9 +1,9 @@
 # SPEC — meshlink v1 (MVP)
 
-Mini zero-trust mesh VPN. Go monorepo. Everything can be tested over
-localhost without root, using the NAT simulator (`natbox`).
+Mini sıfır-güven mesh VPN. Go monorepo. Her şey, NAT simülatörü (`natbox`)
+kullanılarak root gerektirmeden localhost üzerinde test edilebilir.
 
-## Module and folder structure
+## Modül ve klasör yapısı
 
 ```
 module meshlink  (go 1.26)
@@ -34,81 +34,82 @@ scripts/
 Makefile
 ```
 
-## Port layout (default, demo)
+## Port yerleşimi (varsayılan, demo)
 
-| Component | Port |
+| Bileşen | Port |
 |---|---|
-| coordinator TCP (control) | 19200 |
-| coordinator UDP (STUN) | 19201 |
+| koordinatör TCP (kontrol) | 19200 |
+| koordinatör UDP (STUN) | 19201 |
 | relay UDP | 19205 |
-| natbox-1 public / inside door | 19301 / 19401 |
-| natbox-2 public / inside door | 19302 / 19402 |
-| agent a (data) | 19501 |
-| agent b (data) | 19502 |
+| natbox-1 public / iç kapı | 19301 / 19401 |
+| natbox-2 public / iç kapı | 19302 / 19402 |
+| agent a (veri) | 19501 |
+| agent b (veri) | 19502 |
 
-## Dependency
+## Bağımlılık
 
-Only `github.com/flynn/noise v1.1.0`. (x/crypto, x/sys transitive.)
+Yalnızca `github.com/flynn/noise v1.1.0`. (x/crypto, x/sys geçişli.)
 
-## 1. Wire format — data plane (UDP datagram = single frame)
+## 1. Hat formatı — veri düzlemi (UDP datagram = tek çerçeve)
 
-Frame: `[1B type][2B length BE][payload]`, length <= 65535.
+Çerçeve: `[1B type][2B length BE][payload]`, uzunluk <= 65535.
 
-| type | name | meaning |
+| type | name | anlam |
 |---|---|---|
-| 1 | HS1 | Noise XX message 1 (initiator → responder) |
-| 2 | HS2 | Noise XX message 2 (responder → initiator) |
-| 3 | HS3 | Noise XX message 3 (initiator → responder) |
-| 4 | PROBE | empty probe (hole punching / NAT mapping) |
-| 5 | DATA | encrypted Noise transport message: `[8B nonce BE][ciphertext]` (AEAD) |
-| 7 | RELAY | agent → relay: `[magic 0x52][u16 src_len][src][u16 dst_len][dst][inner frame]`; relay → agent is likewise re-wrapped with the same header (the receiver thus separates the source identity for multiple peers) |
+| 1 | HS1 | Noise XX mesajı 1 (başlatıcı → yanıtlayıcı) |
+| 2 | HS2 | Noise XX mesajı 2 (yanıtlayıcı → başlatıcı) |
+| 3 | HS3 | Noise XX mesajı 3 (başlatıcı → yanıtlayıcı) |
+| 4 | PROBE | boş yoklama (delik delme / NAT eşlemesi) |
+| 5 | DATA | şifreli Noise taşıma mesajı: `[8B nonce BE][ciphertext]` (AEAD) |
+| 7 | RELAY | ajan → relay: `[magic 0x52][u16 src_len][src][u16 dst_len][dst][inner frame]`; relay → ajan da aynı başlıkla yeniden sarılır (alıcı böylece birden çok eş için kaynak kimliğini ayırır) |
 
-All length/endpoint fields are big-endian. The `record` package implements this contract.
+Tüm uzunluk/uç nokta alanları big-endian'dır. `record` paketi bu sözleşmeyi
+uygular.
 
-## 2. Wire format — control plane (agent ↔ coordinator, TCP, Noise-auth framed)
+## 2. Hat formatı — kontrol düzlemi (ajan ↔ koordinatör, TCP, Noise-auth çerçeveli)
 
-The control channel (from Phase 3 onward) is authenticated with Noise XX: the client
-pins the coordinator's static key; each connected party verifies the other's
-`Session.PeerStatic()` key. After the handshake completes, every message is
-sent as `[4B length BE][ciphertext]`; the contents of the ciphertext are a single
-line of JSON (ends with `\n`). The length cap is bounded by `maxMsgLen`.
+Kontrol kanalı (Faz 3'ten itibaren) Noise XX ile kimliği doğrulanır: istemci
+koordinatörün statik anahtarını sabitler; bağlı her taraf diğerinin
+`Session.PeerStatic()` anahtarını doğrular. El sıkışma tamamlandıktan sonra her
+mesaj `[4B length BE][ciphertext]` olarak gönderilir; ciphertext'in içeriği tek
+satır JSON'dur (`\n` ile biter). Uzunluk tavanı `maxMsgLen` ile sınırlıdır.
 
-Handshake messages flow as `[2B length BE][Noise message]` (unencrypted, not unsigned —
-Noise's own authentication mix) and are bounded by
-`handshakeTimeout`.
+El sıkışma mesajları `[2B length BE][Noise message]` olarak akar (şifresiz,
+imzasız değil — Noise'in kendi kimlik doğrulama karışımı) ve
+`handshakeTimeout` ile sınırlıdır.
 
-Agent → Coor:
+Ajan → Coor:
 ```json
 {"type":"register","id":"a","pubkey":"<hex32>","endpoints":["127.0.0.1:19301","127.0.0.1:19205"]}
 ```
-- `endpoints[0]`: public udp endpoint learned via STUN (data plane).
-- `endpoints[1]` (optional): if a relay endpoint is used.
+- `endpoints[0]`: STUN ile öğrenilen public UDP uç noktası (veri düzlemi).
+- `endpoints[1]` (isteğe bağlı): bir relay uç noktası kullanılıyorsa.
 
-Coor → Agent:
+Coor → Ajan:
 ```json
 {"type":"hello","id":"a"}
 {"type":"peer_list","peers":[{"id":"a","pubkey":"<hex32>","endpoints":["..."]}]}
 {"type":"error","msg":"..."}
 ```
 
-Behavior: after every register, the coordinator sends `peer_list` to ALL peers (including the sender).
-`peer_list` is an empty array if there are no peers.
+Davranış: her kayıttan sonra koordinatör `peer_list`'i TÜM eşlere gönderir
+(gönderen dahil). Hiç eş yoksa `peer_list` boş bir dizidir.
 
-## 3. Crypto
+## 3. Kripto
 
-- Pattern: **Noise XX** (`noise.HandshakeXX`), CipherSuite: `DH25519 + CipherChaChaPoly + HashSHA256`.
-- Prologue: `meshlink-v1` (identical on both sides).
-- Role assignment: if `id_a < id_b` (bytewise) then `a` is initiator, `b` responder.
-- Post-handshake authentication: each side **must verify** that its `Session.PeerStatic()` value
-  matches the peer pubkey received from the coordinator.
-- Transport data: `CipherState.WriteMessage` → ciphertext; frame type DATA.
-- Data plane (Phase 2): explicit 64-bit nonce + WireGuard-style sliding window on the
-  receiver (2048-bit bitmap) — duplicate/stale nonce rejection, loss tolerance.
-- Periodic rekey: key rotation every `RekeyEvery` (default 2^20) messages;
-  `maxEpochJump` DoS cap; nonce-exhaustion guard and session age limit.
-- Keepalive: empty DATA frame after 10 s of silence (NAT mapping + liveness).
+- Desen: **Noise XX** (`noise.HandshakeXX`), CipherSuite: `DH25519 + CipherChaChaPoly + HashSHA256`.
+- Prolog: `meshlink-v1` (her iki tarafta aynı).
+- Rol ataması: `id_a < id_b` ise (bayt bazında) `a` başlatıcı, `b` yanıtlayıcıdır.
+- El sıkışma sonrası kimlik doğrulama: her taraf, `Session.PeerStatic()` değerinin
+  koordinatörden alınan eş pubkey'i ile eşleştiğini **doğrulamalıdır**.
+- Taşıma verisi: `CipherState.WriteMessage` → ciphertext; çerçeve tipi DATA.
+- Veri düzlemi (Faz 2): açık 64-bit nonce + alıcıda WireGuard tarzı kayan
+  pencere (2048-bit bitmap) — yinelenen/bayat nonce reddi, kayıp toleransı.
+- Periyodik rekey: her `RekeyEvery` (varsayılan 2^20) mesajda anahtar dönüşü;
+  `maxEpochJump` DoS kapağı; nonce tükenme koruması ve oturum yaş sınırı.
+- Keepalive: 10 s sessizlikten sonra boş DATA çerçevesi (NAT eşlemesi + canlılık).
 
-## 4. Package API contracts
+## 4. Paket API sözleşmeleri
 
 ### internal/record
 ```go
@@ -125,7 +126,8 @@ func Frame(t byte, payload []byte) []byte                    // t ++ u16be(len) 
 func Parse(datagram []byte) (t byte, payload []byte, err error) // tek frame; error: ErrTooShort, ErrOversized, ErrTrailing
 func ReadFrame(r io.Reader) (t byte, payload []byte, err error) // stream (TCP) için, HeaderLen oku sonra payload
 ```
-Errors: `var ErrTooShort`, `var ErrOversized`, `var ErrTrailing`. Test: roundtrip, 0-payload, 65535-payload, corrupted datagram.
+Hatalar: `var ErrTooShort`, `var ErrOversized`, `var ErrTrailing`. Test: gidiş-dönüş,
+0-payload, 65535-payload, bozuk datagram.
 
 ### internal/noisework
 ```go
@@ -161,11 +163,12 @@ func (r *Responder) ReadMessage1(msg1 []byte) error
 func (r *Responder) Message2() ([]byte, error)
 func (r *Responder) ReadMessage3(msg3 []byte) (*Session, error)
 ```
-Contract: `PeerStatic()` is populated once the handshake completes; nil before that. Wrong static/corrupted message →
-error. Rekey: both sender and receiver apply the same epoch rule; exceeding `maxEpochJump` is rejected,
-lost packets are tolerated via epoch jumps. Test: initiator/responder loop + multiple
-Encrypt/Decrypt + buffered-message error + peerStatic match + lost/out-of-order nonce + rekey
-rotations + stale-nonce rejection.
+Sözleşme: `PeerStatic()` el sıkışma tamamlandığında doldurulur; öncesinde nil'dir.
+Yanlış statik/bozuk mesaj → hata. Rekey: gönderen ve alıcı aynı epoch kuralını
+uygular; `maxEpochJump` aşımı reddedilir, kaybolan paketler epoch atlamalarıyla
+tolere edilir. Test: başlatıcı/yanıtlayıcı döngüsü + birden çok Encrypt/Decrypt +
+tamponlanmış mesaj hatası + peerStatic eşleşmesi + kayıp/sıra dışı nonce + rekey
+dönüşleri + bayat-nonce reddi.
 
 ### internal/stun
 ```go
@@ -178,7 +181,8 @@ func ResolvePublicAddr(conn *net.UDPConn, server *net.UDPAddr, timeout time.Dura
 func HandleBindingRequest(pkt []byte, src *net.UDPAddr) ([]byte, error)
     // sunucu tarafı: src için XOR-MAPPED-ADDRESS içeren binding response üret.
 ```
-Test: server↔client roundtrip over a real UDP conn; truncated-packet error; invalid-cookie error.
+Test: gerçek bir UDP bağlantısı üzerinde sunucu↔istemci gidiş-dönüşü;
+kırpılmış-paket hatası; geçersiz-cookie hatası.
 
 ### internal/nat
 ```go
@@ -205,16 +209,21 @@ func (b *Box) Public() *net.UDPAddr            // cfg.PublicAddr döner
 func (b *Box) Stats() Stats
 type Stats struct { Outbound, Inbound, Dropped uint64; Mappings int }
 ```
-Behavior contract:
-- Outbound: a packet arriving at the inside door with src == PrivateHost → create a mapping, rewrite src to PublicAddr,
-  send to the real dst over the PublicSocket. Envelope: `[0x52][u16 src_len][src][u16 dst_len][dst][inner frame]`.
-- Inbound: a packet arriving at the PublicSocket → per the behavior rules, forward to PrivateHost if applicable. Delivery
-  is done inside an envelope carrying the real external source address: `[0x53][u16 src_len][src][frame]` (src = the
-  external host's PublicSocket address). Since source addresses cannot be spoofed over loopback, the agent matches a peer
-  only from this external source; STUN responses and frames are likewise processed by opening the same envelope.
-- Mapping expiration: 30 s (tests may pass `0` = forever — you may add `MappingTTL time.Duration` to Config; 0 = never expire).
-Test: fullcone client↔extern roundtrip; symmetric: inbound accepted after outbound to the same dst, inbound DROP to a
-different dst; restricted: inbound DROP from a src IP with no mapping.
+Davranış sözleşmesi:
+- Çıkış (outbound): iç kapıya src == PrivateHost ile gelen bir paket → bir eşleme
+  oluştur, src'yi PublicAddr olarak yeniden yaz, PublicSocket üzerinden gerçek
+  hedefe gönder. Zarf: `[0x52][u16 src_len][src][u16 dst_len][dst][inner frame]`.
+- Giriş (inbound): PublicSocket'e gelen bir paket → davranış kurallarına göre,
+  uygunsa PrivateHost'a ilet. Teslim, gerçek dış kaynak adresini taşıyan bir zarf
+  içinde yapılır: `[0x53][u16 src_len][src][frame]` (src = dış hostun PublicSocket
+  adresi). Loopback üzerinde kaynak adresleri taklit edilemediğinden ajan bir eşi
+  yalnızca bu dış kaynaktan eşleştirir; STUN yanıtları ve çerçeveler de aynı zarf
+  açılarak işlenir.
+- Eşleme süresi dolumu: 30 s (testler `0` geçebilir = sonsuza kadar — Config'e
+  `MappingTTL time.Duration` ekleyebilirsiniz; 0 = asla süresi dolmaz).
+Test: fullcone istemci↔dış gidiş-dönüşü; symmetric: aynı hedefe outbound'tan sonra
+inbound kabul edilir, farklı bir hedefe inbound DROP; restricted: eşlemesi olmayan
+bir src IP'den inbound DROP.
 
 ### internal/relay
 ```go
@@ -239,19 +248,20 @@ type Stats struct {
     RateLimited   uint64  // rate/kota bütçesini aşan paketler (G4)
 }
 ```
-Behavior (Phase 3): the address `peers[srcID]` is **pinned** per packet; if the same name
-appears from another address within `PinGrace`, the packet is rejected (`PinnedDropped++`,
-name stealing/delivery disruption is closed — G2). If `Peers[dstID]` exists, forward the
-frame there; when the per-source-address pps/byte budget or the per-destination-name byte
-quota is exceeded, `RateLimited++` (the amplification surface shrinks — G4). The forwarded
-datagram is re-wrapped with the same relay header
-(`[0x52][u16 src_len][src][u16 dst_len][dst][frame]`), so N peers sharing a single relay
-socket can distinguish the source identity of a delivered packet.
-The relay never sees the encrypted data (end-to-end Noise).
-Test: two "agents" exchange frames over the relay with localhost UDP conns; unknown-dst drop; corrupted-header error;
-pin-violation drop; rate-limit/quota flags.
+Davranış (Faz 3): `peers[srcID]` adresi paket başına **sabitlenir**; aynı isim
+`PinGrace` içinde başka bir adresten görünürse paket reddedilir
+(`PinnedDropped++`, isim hırsızlığı/teslimat bozma kapatılır — G2).
+`Peers[dstID]` varsa çerçeveyi oraya ilet; kaynak-adres başına pps/byte bütçesi
+veya hedef-isim başına byte kotası aşılırsa `RateLimited++` (amplifikasyon yüzeyi
+küçülür — G4). İletilen datagram aynı relay başlığıyla yeniden sarılır
+(`[0x52][u16 src_len][src][u16 dst_len][dst][frame]`), böylece tek bir relay
+soketini paylaşan N eş, teslim edilen bir paketin kaynak kimliğini ayırt
+edebilir. Relay şifreli veriyi asla görmez (uçtan uca Noise).
+Test: iki "ajan" localhost UDP bağlantılarıyla relay üzerinden çerçeve alışverişi
+yapar; bilinmeyen-hedef düşüşü; bozuk-başlık hatası; pin-ihlali düşüşü;
+rate-limit/kota bayrakları.
 
-### internal/protocol (control plane)
+### internal/protocol (kontrol düzlemi)
 ```go
 type Message struct {                    // tek struct, Type string
     Type      string `json:"type"`
@@ -270,9 +280,9 @@ const ( TypeRegister="register"; TypeHello="hello"; TypePeerList="peer_list"; Ty
 func EncodeLine(v any) ([]byte, error)            // JSON + "\n"
 func DecodeLine(b []byte) (*Message, error)
 ```
-Test: register/peer_list roundtrip.
+Test: register/peer_list gidiş-dönüşü.
 
-### internal/control (control connection)
+### internal/control (kontrol bağlantısı)
 ```go
 type Conn struct{...}          // Noise-XX ile doğrulanmış, çerçeveli TCP bağlantısı
 func Initiate(conn net.Conn, myKP *Keypair, peerStatic []byte) (*Conn, error)
@@ -283,8 +293,8 @@ func (c *Conn) WriteMsg(plaintext []byte) error   // [4B uzunluk BE][ciphertext]
 func (c *Conn) ReadMsg() ([]byte, error)          // uzunluk tavanı maxMsgLen; opsiyonel session kanal
 func (c *Conn) Close() error
 ```
-Both sides **must verify** `PeerStatic()` (agent: the coordinator's key,
-coordinator: the register pubkey — if the key/signature does not match, TypeError/session rejection).
+Her iki taraf da `PeerStatic()`'i **doğrulamalıdır** (ajan: koordinatörün anahtarı,
+koordinatör: register pubkey'i — anahtar/imza eşleşmezse TypeError/oturum reddi).
 
 ### internal/coordinator
 ```go
@@ -300,31 +310,37 @@ func (s *Server) Close() error
 func (s *Server) PublicKeyHex() string            // agent'ların --coord-pubkey değeri
 func (s *Server) Addrs() (ctrl, stun net.Addr)
 ```
-- Every client is authenticated via `control.Accept`; the pubkey in register is accepted as long as it
-  matches the Noise session's static key; a second registration of the same name with a different
-  key is rejected (name pinning).
-- STUN: use `stun.HandleBindingRequest`, send the response to src.
-- After register, `peer_list` is broadcast to all connected peers (writes are
-  mutex-protected — concurrent broadcasts do not interleave frames).
-Test: two register requests → peer_list on both sides; wrong-key register rejection;
-spoofed registration (pubkey/session key mismatch) TypeError.
+- Her istemci `control.Accept` ile kimlik doğrulanır; register'daki pubkey, Noise
+  oturumunun statik anahtarıyla eşleştiği sürece kabul edilir; aynı ismin farklı
+  bir anahtarla ikinci kez kaydı reddedilir (isim sabitleme).
+- STUN: `stun.HandleBindingRequest` kullanın, yanıtı src'ye gönderin.
+- Kayıttan sonra `peer_list` bağlı tüm eşlere yayınlanır (yazımlar mutex ile
+  korunur — eşzamanlı yayınlar çerçeveleri iç içe geçirmez).
+Test: iki register isteği → iki tarafta da peer_list; yanlış-anahtarlı kayıt reddi;
+sahte kayıt (pubkey/oturum anahtarı uyuşmazlığı) TypeError.
 
-## 5. Integration (agent, disco, peer — main agent writes)
+## 5. Entegrasyon (agent, disco, peer — ana ajan yazıları)
 
-Agent behavior (in brief, the integration contract):
-- If `--nat <door>` is given, all outbound packets go to the door; otherwise DIRECTLY to dst.
-- STUN: binding request to the coordinator STUN over the data socket (through the door) → public endpoint.
-- register: name + pubkey + [public, relay] endpoints.
-- peer_list → for each peer: role assignment; PROBEs (500 ms period) → HS1 (initiator) →
-  HS2/HS3 → data. If the direct handshake fails within 3 s → RELAY path (wrap + probe + handshake).
-- Ping message as JSON inside a DATA frame: `{"cmd":"ping","s":<seq>,"ts":<unixnano>}` →
-  `{"cmd":"pong","s":<seq>,"ts":<unixnano>}`. RTT, loss, and path (direct|relay) are reported.
-- Daemon (`up`): processes DATA messages from peers (pong/ping replies), periodic keepalive.
+Ajan davranışı (kısaca, entegrasyon sözleşmesi):
+- `--nat <door>` verildiyse tüm giden paketler kapıya gider; aksi halde DOĞRUDAN hedefe.
+- STUN: veri soketi üzerinden (kapı üzerinden) koordinatör STUN'una binding isteği
+  → public uç nokta.
+- register: isim + pubkey + [public, relay] uç noktaları.
+- peer_list → her eş için: rol ataması; PROBE'lar (500 ms periyot) → HS1 (başlatıcı) →
+  HS2/HS3 → veri. Doğrudan el sıkışma 3 s içinde başarısız olursa → RELAY yolu
+  (sar + probe + el sıkışma).
+- DATA çerçevesi içinde JSON olarak ping mesajı: `{"cmd":"ping","s":<seq>,"ts":<unixnano>}` →
+  `{"cmd":"pong","s":<seq>,"ts":<unixnano>}`. RTT, kayıp ve yol (direct|relay) raporlanır.
+- Daemon (`up`): eşlerden gelen DATA mesajlarını (pong/ping yanıtları) işler, periyodik keepalive.
 
-## 6. Quality rules
+## 6. Kalite kuralları
 
-- `go vet` clean, `gofmt` applied, errors wrapped with `fmt.Errorf("...: %w")`.
-- Use `net.ListenPacket("udp", "127.0.0.1:0")` with an ephemeral port in tests (no port conflicts).
-- Tests require no root and no real network usage (localhost).
-- Every package has a `// Package ...` doc comment; cross-package imports are forbidden: record/noisework/stun/nat/relay/protocol/coordinator are dagger-independent. Only main packages and integration packages import the others.
-- Cancellation via `context.Context`; Run(ctx) shuts down cleanly when ctx is cancelled.
+- `go vet` temiz, `gofmt` uygulanmış, hatalar `fmt.Errorf("...: %w")` ile sarılmış.
+- Testlerde geçici (ephemeral) bir portla `net.ListenPacket("udp", "127.0.0.1:0")`
+  kullanın (port çakışması yok).
+- Testler root ve gerçek ağ kullanımı gerektirmez (localhost).
+- Her paketin `// Package ...` dokümantasyon yorumu vardır; paketler arası içe
+  aktarımlar yasaktır: record/noisework/stun/nat/relay/protocol/coordinator
+  birbirinden bağımsızdır. Yalnızca main paketleri ve entegrasyon paketleri
+  diğerlerini içe aktarır.
+- İptal `context.Context` üzerinden; ctx iptal edildiğinde Run(ctx) temiz biçimde kapanır.

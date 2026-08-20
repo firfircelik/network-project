@@ -1,5 +1,7 @@
 # meshlink
 
+**🌐 Languages:** [English](README.md) · [Türkçe](README.tr.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Deutsch](README.de.md)
+
 Encrypted, NAT-traversing P2P mesh VPN written in Go. Agents talk over
 Noise-XX encrypted tunnels, punch through NATs with STUN + simultaneous-open
 hole punching, and fall back to a relay when a direct path is impossible —
