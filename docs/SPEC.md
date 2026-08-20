@@ -1,6 +1,6 @@
 # SPEC — meshlink v1 (MVP)
 
-Mini zero-trust mesh VPN (fromquantum tarzı). Go monorepo. Her şey localhost üzerinde
+Mini zero-trust mesh VPN. Go monorepo. Her şey localhost üzerinde
 root gerektirmeden, NAT simülatörü (`natbox`) ile test edilebilir.
 
 ## Modül ve klasör yapısı
@@ -9,21 +9,23 @@ root gerektirmeden, NAT simülatörü (`natbox`) ile test edilebilir.
 module meshlink  (go 1.26)
 
 cmd/
-  coordinator/main.go    # kontrol sunucusu (TCP kayıt + UDP STUN)
-  relay/main.go          # UDP röle sunucusu
+  coordinator/main.go    # kontrol sunucusu (TCP kayıt + UDP STUN, Noise oturumları)
+  relay/main.go          # UDP röle sunucusu (isim pinleme + rate-limit/kota)
   natbox/main.go         # NAT simülatörü
   agent/main.go          # istemci (daemon `up` + tek seferlik `ping`)
 internal/
-  record/                # data-plane çerçeveleme (takım: transport)
-  noisework/             # Noise XX handshake + oturum (takım: transport)
-  stun/                  # STUN istemci+sunucu (takım: nat)
-  nat/                   # natbox çekirdeği (takım: nat)
-  relay/                 # röle sunucusu çekirdeği (takım: nat)
-  protocol/              # kontrol düzlemi JSON mesajları (takım: control)
-  coordinator/           # koordinatör çekirdeği (takım: control)
-  peer/                  # oturum yöneticisi (entegrasyon)
-  disco/                 # hole punching + yol seçimi (entegrasyon)
-  agent/                 # istemci çekirdeği (entegrasyon)
+  record/                # data-plane çerçeveleme
+  noisework/             # Noise XX handshake + oturum (rekey, replay penceresi)
+  control/               # doğrulanmış kontrol bağlantısı + çerçeveleme (Noise-auth)
+  stun/                  # STUN istemci+sunucu
+  nat/                   # natbox çekirdeği (NAT simülatörü)
+  relay/                 # röle sunucusu çekirdeği
+  protocol/              # kontrol düzlemi JSON mesajları
+  coordinator/           # koordinatör çekirdeği (isim/anahtar pinleme)
+  peer/                  # oturum yöneticisi
+  disco/                 # hole punching + yol seçimi
+  agent/                 # istemci çekirdeği (TUN köprüsü dahil)
+  tun/                   # TUN aygıtı + IPv4 rota tablosu
 docs/
   ARCHITECTURE.md
   SPEC.md
@@ -58,7 +60,7 @@ Frame: `[1B type][2B length BE][payload]`, length <= 65535.
 | 2 | HS2 | Noise XX mesaj 2 (responder → initiator) |
 | 3 | HS3 | Noise XX mesaj 3 (initiator → responder) |
 | 4 | PROBE | boş probe (hole punching / NAT mapping) |
-| 5 | DATA | şifreli Noise transport mesajı (AEAD, artan nonce) |
+| 5 | DATA | şifreli Noise transport mesajı: `[8B nonce BE][ciphertext]` (AEAD) |
 | 7 | RELAY | agent → röle: `[magic 0x52][u16 src_len][src][u16 dst_len][dst][inner frame]`; röle → agent da aynı başlıkla yeniden sarılır (alıcı çoklu eş için kaynak kimliğini böyle ayırır) |
 
 Tüm uzunluk/endpoint alanları big-endian. `record` paketi bu sözleşmeyi uygular.
@@ -92,7 +94,7 @@ Coor → Agent:
 Davranış: her register sonrası koordinatör TÜM eşlere `peer_list` gönderir (gönderen dahil).
 `peer_list` hiç eş yoksa boş dizi olur.
 
-## 3. Kripto (takım: transport)
+## 3. Kripto
 
 - Pattern: **Noise XX** (`noise.HandshakeXX`), CipherSuite: `DH25519 + CipherChaChaPoly + HashSHA256`.
 - Prologue: `meshlink-v1` (her iki taraf aynı).
@@ -128,14 +130,21 @@ Hatalar: `var ErrTooShort`, `var ErrOversized`, `var ErrTrailing`. Test: roundtr
 ### internal/noisework
 ```go
 const KeySize = 32
+const DefaultRekeyEvery uint64 = 1 << 20  // her yönde anahtar dönüş mesaj sayısı
+const MaxNonce = ^uint64(0) - 1           // nonce tükenme guard'ı (rekey rezervi)
 type Keypair struct { Public, Private []byte }  // raw 32 bayt, her zaman yeniden tahsis
 func GenerateKeypair() (*Keypair, error)
+func LoadOrCreateKeyfile(path string) (*Keypair, error)  // hex dosya okur; yoksa 0600 ile üretir
 func (k *Keypair) PublicHex() string
 func ParsePublicKeyHex(s string) ([]byte, error)
 
 type Session struct { peerStatic, channelBinding []byte }  // unexported alanlar
-func (s *Session) Encrypt(plaintext []byte) ([]byte, error)    // send.WriteMessage(plaintext)
-func (s *Session) Decrypt(ciphertext []byte) ([]byte, error)   // recv.ReadMessage(ciphertext)
+func (s *Session) Send(plaintext []byte) (uint64, []byte, error)
+    // DATA nonce'u + ciphertext; nonce açıkça frame başında taşınır (8B BE).
+    // maxEpochJump üstünde rekey gerektiren nonce reddedilir (DoS kapağı).
+func (s *Session) Encrypt(plaintext []byte) ([]byte, error)     // kontrol kanalı: sıralı send
+func (s *Session) DecryptAt(nonce uint64, ciphertext []byte) ([]byte, error)  // veri kanalı: explicit nonce
+func (s *Session) Decrypt(ciphertext []byte) ([]byte, error)    // kontrol kanalı: sıralı recv
 func (s *Session) PeerStatic() []byte
 func (s *Session) ChannelBinding() []byte
 func (s *Session) MaxPlaintextLen() int  // en büyük tek-datagram plaintext'i: 65507 (max IPv4 UDP) - 3 (frame hdr) - 16 (AEAD tag) = 65504; relay yolunda ayrıca relay başlığı kadar azalır
@@ -153,8 +162,10 @@ func (r *Responder) Message2() ([]byte, error)
 func (r *Responder) ReadMessage3(msg3 []byte) (*Session, error)
 ```
 Kontrat: `PeerStatic()` handshake tamamlanınca dolu; öncesinde nil. Yanlış statik/bozuk mesaj →
-error. Test: initiator/responder döngüsü + çoklu Encrypt/Decrypt + tamponlı mesaj error + peerStatic
-eşleşmesi.
+error. Rekey: hem gönderici hem alıcı aynı epoch kuralını uygular; `maxEpochJump` aşımı reddedilir,
+kayıp paketler epoch atlamasıyla tolere edilir. Test: initiator/responder döngüsü + çoklu
+Encrypt/Decrypt + tamponlı mesaj error + peerStatic eşleşmesi + kayıp/sırasız nonce + rekey
+dönüşleri + eski nonce reddi.
 
 ### internal/stun
 ```go
@@ -209,24 +220,36 @@ dst'ye inbound DROP; restricted: mapping olmayan src IP inbound DROP.
 ```go
 const Magic byte = 0x52
 const MaxNameLen = 64
-func WrapPacket(srcID, dstID string, frame []byte) ([]byte, error)
-    // [0x52][u16 src_len][src][u16 dst_len][dst][frame]  (frame = record.Frame çıktısı)
-func ParsePacket(pkt []byte) (srcID, dstID string, frame []byte, err error)
-type Config struct { Addr *net.UDPAddr }
+type Config struct {
+    Addr *net.UDPAddr          // dinleme adresi; port 0 ephemeral (Addr() gerçek portu söyler)
+    PinGrace time.Duration     // isim→adres pin süresi (varsayılan 30s; 0 = varsayılan, <0 = pin yok)
+    MaxPPS int                 // kaynak adres başına pps limiti (varsayılan 300; <0 = kapalı)
+    MaxBytesPS int             // kaynak adres başına byte/s limiti (varsayılan 128 KiB/s; <0 = kapalı)
+    NameQuotaBytes int         // hedef isim başına forwarded byte/s kotası (varsayılan 256 KiB/s; <0 = kapalı)
+}
 type Server struct{}
 func New(cfg Config) (*Server, error)
 func (s *Server) Run(ctx context.Context) error
 func (s *Server) Close() error
 func (s *Server) Addr() *net.UDPAddr
 func (s *Server) Stats() Stats
-type Stats struct { Wrapped, Forwarded, Dropped uint64 }
+type Stats struct {
+    Wrapped, Forwarded, Dropped uint64
+    PinnedDropped uint64  // kaynak ismi başka adrese pinli olduğu için reddedilen (G2)
+    RateLimited   uint64  // rate/kota bütçesini aşan paketler (G4)
+}
 ```
-Davranış: paket başına `peers[srcID] = kaynakAddr` kaydet; sonra `peers[dstID]` varsa frame'i oraya
-ilet (`Dropped++` yoksa). İletilen datagram aynı relay başlığıyla yeniden sarılır
-(`[0x52][u16 src_len][src][u16 dst_len][dst][frame]`), böylece tek relay soketini paylaşan N eş,
-teslim edilen paketin kaynak kimliğini ayırt edebilir. Harici kimlik doğrulama yok — röle şifreli
-veriyi görmez (uçtan uca Noise).
-Test: iki "agent" localhost UDP conn ile relay üzerinden frame alışverişi; bilinmeyen dst drop; başlık bozuk error.
+Davranış (Faz 3): paket başına `peers[srcID]` adresi **pinlenir**; aynı isim
+`PinGrace` içinde başka adresten gelirse paket reddedilir (`PinnedDropped++`,
+isim kaçırma/teslimat bozma kapanır — G2). `Peers[dstID]` varsa frame'i oraya
+iletir; kaynak adresi başına pps/byte bütçesi ve hedef isim başına byte kotası
+aşılınca `RateLimited++` (amplification yüzeyi daralır — G4). İletilen datagram
+aynı relay başlığıyla yeniden sarılır
+(`[0x52][u16 src_len][src][u16 dst_len][dst][frame]`), böylece tek relay
+soketini paylaşan N eş, teslim edilen paketin kaynak kimliğini ayırt edebilir.
+Relay şifreli veriyi görmez (uçtan uca Noise).
+Test: iki "agent" localhost UDP conn ile relay üzerinden frame alışverişi; bilinmeyen dst drop; başlık bozuk error;
+pin ihlali drop; rate-limit/kota bayrakları.
 
 ### internal/protocol (kontrol düzlemi)
 ```go
@@ -249,22 +272,42 @@ func DecodeLine(b []byte) (*Message, error)
 ```
 Test: register/peer_list roundtrip.
 
+### internal/control (kontrol bağlantısı)
+```go
+type Conn struct{...}          // Noise-XX ile doğrulanmış, çerçeveli TCP bağlantısı
+func Initiate(conn net.Conn, myKP *Keypair, peerStatic []byte) (*Conn, error)
+    // istemci tarafı: koordinatör/peer statik anahtarını sabitler; handshakeTimeout sınırlı
+func Accept(conn net.Conn, myKP *Keypair) (peerStatic []byte, c *Conn, err error)
+    // sunucu tarafı; peer static anahtarı döner (kayıtla eşleştirilir)
+func (c *Conn) WriteMsg(plaintext []byte) error   // [4B uzunluk BE][ciphertext]; eşzamanlı yazıcılar mutex'li
+func (c *Conn) ReadMsg() ([]byte, error)          // uzunluk tavanı maxMsgLen; opsiyonel session kanal
+func (c *Conn) Close() error
+```
+Her iki taraf `PeerStatic()`i **doğrulamak zorundadır** (agent: koordinatör anahtarı,
+koordinatör: register pubkey — anahtar/imza eşleşmezse TypeError/oturum reddi).
+
 ### internal/coordinator
 ```go
 type Config struct {
-    CtrlAddr string // "ip:port" TCP dinleme
-    StunAddr string // "ip:port" UDP dinleme
+    CtrlAddr string // "ip:port" TCP dinleme (kontrol düzlemi)
+    StunAddr string // "ip:port" UDP dinleme (STUN)
+    Keyfile  string // koordinatör statik anahtarının yolu (hex; yoksa 0600 ile üretilir)
 }
 type Server struct{}
 func New(cfg Config) (*Server, error)
 func (s *Server) Run(ctx context.Context) error   // TCP + STUN UDP aynı anda
 func (s *Server) Close() error
-func (s *Server) Addr() (ctrl, stun *net.TCPAddr, *net.UDPAddr) // hmm iki değer; Addrs() (ctrl net.Addr, stun net.Addr)
+func (s *Server) PublicKeyHex() string            // agent'ların --coord-pubkey değeri
+func (s *Server) Addrs() (ctrl, stun net.Addr)
 ```
+- Her istemci `control.Accept` ile doğrulanır; register'daki pubkey, Noise
+  oturumunun statik anahtarıyla çakıştığı sürece kabul edilir; aynı isimde
+  farklı anahtar ikinci kayıt reddedilir (isim pinleme).
 - STUN: `stun.HandleBindingRequest` kullan, src'ye response gönder.
-- TCP: her conn bağımsız. `register` alınca store + broadcast `peer_list`.
-- Conn kapandığında peer'i kaldırma (MVP: kalıcı registry, yeniden register günceller). Not düş.
-Test: iki register isteği → her iki tarafta peer_list doğrula.
+- Register sonrası tüm bağlı eşlere `peer_list` broadcast edilir (yazma
+  mutex'li — eşzamanlı broadcast'ler çerçevelemez).
+Test: iki register isteği → her iki tarafta peer_list; yanlış-key register reddi;
+spoof'lu (pubkey/oturum anahtarı eşleşmeyen) kayıt TypeError.
 
 ## 5. Entegrasyon (agent, disco, peer — main agent yazar)
 

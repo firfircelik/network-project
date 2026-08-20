@@ -1,10 +1,10 @@
 # meshlink — Architecture
 
-`meshlink` is a mini zero-trust mesh VPN built in Go, mirroring the product
-stack described in the fromquantum job ad: an encrypted transport layer, NAT
-traversal, transport fallback, and a modular client. It runs entirely on
-localhost during development — NAT boxes are simulated so hole punching and
-relay fallback can be demonstrated without root or real networking hardware.
+`meshlink` is a mini zero-trust mesh VPN built in Go: an encrypted transport
+layer, NAT traversal, transport fallback, and a modular client. It runs
+entirely on localhost during development — NAT boxes are simulated so hole
+punching and relay fallback can be demonstrated without root or real
+networking hardware.
 
 ## Components
 
