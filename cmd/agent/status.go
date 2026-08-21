@@ -142,6 +142,8 @@ type peerJSON struct {
 	RTTHistoryMs []float64 `json:"rtt_history_ms,omitempty"` // newest first
 	Rekeys       uint64    `json:"rekeys"`
 	AgeS         float64   `json:"age_s"` // 0 = no session installed
+	BytesSent    uint64    `json:"bytes_sent"`
+	BytesRecv    uint64    `json:"bytes_recv"`
 	Endpoint     string    `json:"endpoint,omitempty"`
 }
 
@@ -190,6 +192,8 @@ func renderStatusJSON(st agent.Status, qerr error) error {
 			RTTHistoryMs: hist,
 			Rekeys:       p.RekeyCount,
 			AgeS:         p.SessionAge.Seconds(),
+			BytesSent:    p.BytesSent,
+			BytesRecv:    p.BytesRecv,
 			Endpoint:     p.DirectEP,
 		})
 	}

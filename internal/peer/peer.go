@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"meshlink/internal/disco"
@@ -92,6 +93,8 @@ type Peer struct {
 	hsBurstCount int
 
 	rekeyCount uint64 // sessions replaced while another was live (rotation)
+	bytesTx    uint64 // plaintext bytes sent (atomic)
+	bytesRx    uint64 // plaintext bytes received (atomic)
 
 	doneOnce sync.Once
 	done     chan struct{}
@@ -157,6 +160,13 @@ func (p *Peer) RekeyCount() uint64 {
 	defer p.mu.Unlock()
 	return p.rekeyCount
 }
+
+// BytesSent reports plaintext bytes handed to the tunnel (atomic; safe
+// without p.mu since counters use atomic ops).
+func (p *Peer) BytesSent() uint64 { return atomic.LoadUint64(&p.bytesTx) }
+
+// BytesRecv reports authenticated plaintext bytes received from the tunnel.
+func (p *Peer) BytesRecv() uint64 { return atomic.LoadUint64(&p.bytesRx) }
 
 // SessionAge reports how long the current session has been established
 // (0 when no session is installed).
@@ -704,6 +714,7 @@ func (p *Peer) onData(payload []byte) {
 	if err != nil {
 		return
 	}
+	atomic.AddUint64(&p.bytesRx, uint64(len(plain)))
 	p.replay.Commit(nonce)
 	// An authenticated DATA frame proves the peer holds the session keys, so
 	// the initiator can stop re-emitting HS3 (see onHS2/resendHS3).
@@ -746,6 +757,7 @@ func (p *Peer) encryptLocked(payload []byte) (frame []byte, mode disco.Path, dst
 	binary.BigEndian.PutUint64(wire, nonce)
 	wire = append(wire, cipher...)
 	p.lastSent = time.Now()
+	atomic.AddUint64(&p.bytesTx, uint64(len(payload)))
 	return record.Frame(record.TypeData, wire), p.path, p.DirectEP, nil
 }
 

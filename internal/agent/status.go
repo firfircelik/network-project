@@ -26,6 +26,8 @@ type PeerStatus struct {
 	RTTHistory  []time.Duration // most recent first (protocol order newest->oldest)
 	RekeyCount  uint64
 	SessionAge  time.Duration
+	BytesSent   uint64 // plaintext bytes sent over the tunnel
+	BytesRecv   uint64 // plaintext bytes received from the tunnel
 	DirectEP    string // advertised direct endpoint ("" = unknown)
 }
 
@@ -76,6 +78,8 @@ func (a *Agent) Status() Status {
 			Path:        p.Path().String(),
 			RekeyCount:  p.RekeyCount(),
 			SessionAge:  p.SessionAge(),
+			BytesSent:   p.BytesSent(),
+			BytesRecv:   p.BytesRecv(),
 		}
 		if ep := p.DirectEndpoint(); ep != nil {
 			ps.DirectEP = ep.String()
