@@ -105,11 +105,20 @@ bin/agent status --name b --keyfile key.b --data 0.0.0.0:19502 \
   --coordinator 127.0.0.1:19200 --coord-pubkey <hex> \
   --stun 127.0.0.1:19201 --relay 127.0.0.1:19205
 
+# machine-readable variant for scripts/collectors (logs go to stderr):
+bin/agent status --json --name b --keyfile key.b --data 0.0.0.0:19502 \
+  --coordinator 127.0.0.1:19200 --coord-pubkey <hex> \
+  --stun 127.0.0.1:19201 --relay 127.0.0.1:19205 \
+  --probe-peer a   # optional: ping first so path/RTT are real
+
 # live terminal dashboard: same fields, refreshed every second, RTT history
 bin/agent tui --name b --keyfile key.b --data 0.0.0.0:19502 \
   --coordinator 127.0.0.1:19200 --coord-pubkey <hex> \
   --stun 127.0.0.1:19201 --relay 127.0.0.1:19205
 ```
+
+> The JSON snapshot is what [HomeNetIQ](https://github.com/firfircelik/homenetiq)
+> ingests to score mesh health (path, RTT, rekeys) in its dashboard.
 
 ## Tests
 

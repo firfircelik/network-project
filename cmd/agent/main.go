@@ -52,7 +52,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   meshlink agent up     --name <id> ...      run daemon
   meshlink agent ping   --name <id> --peer <id> [--count N] ...
-  meshlink agent status --name <id> ...      print one-shot status snapshot and exit
+  meshlink agent status --name <id> [--json] ...  print one-shot status snapshot and exit
   meshlink agent tui    --name <id> ...      live terminal dashboard`)
 }
 
@@ -67,9 +67,16 @@ func main() {
 		fs := flag.NewFlagSet("agent "+os.Args[1], flag.ExitOnError)
 		cfg := configFlags(fs)
 		mode := os.Args[1]
-		if mode == "tui" {
-			// slog output would corrupt the terminal dashboard; keep logs on stderr.
+		if mode == "tui" || mode == "status" {
+			// slog output would corrupt the terminal dashboard or a JSON
+			// snapshot piped into another tool; keep logs on stderr.
 			cfg.LogWriter = os.Stderr
+		}
+		var asJSON bool
+		var probePeer string
+		if mode == "status" {
+			fs.BoolVar(&asJSON, "json", false, "print a machine-readable JSON snapshot instead of text")
+			fs.StringVar(&probePeer, "probe-peer", "", "ping this peer once before snapshotting so the report shows a real path/RTT")
 		}
 		var peerID string
 		var count int
@@ -97,7 +104,7 @@ func main() {
 			case "up":
 				return a.Run(ctx)
 			case "status":
-				return runStatus(ctx, a)
+				return runStatus(ctx, a, asJSON, probePeer)
 			case "tui":
 				return runTUI(ctx, a)
 			}
