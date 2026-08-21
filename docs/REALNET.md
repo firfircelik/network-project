@@ -10,6 +10,39 @@ running over a **real network**:
 Also, the TUN bridge is verified with a real e2e that requires root
 (`make tun-demo`, on a single machine).
 
+## LAN quickstart — two devices, no VPS
+
+The fastest way to answer "do two devices see each other?" is over the same
+Wi-Fi/LAN, where direct paths need no NAT traversal:
+
+```sh
+make lan-demo
+```
+
+This starts coordinator + relay on this machine, binds both agent sockets to
+`0.0.0.0`, and pings through the **real LAN/wireless interface** — expected
+result `path=direct`. It also prints a one-shot `agent status` snapshot and the
+exact commands to copy onto a second device:
+
+- Device A (daemon): `bin/agent up --name a ...`
+- Device B (one-shot): `bin/agent ping --name b ... --peer a`
+- Device B (live dashboard): `bin/agent tui --name b ...`
+
+For the LAN the coordinator/relay can run on either device; every command must
+use that machine's `LAN_IP` and the coordinator's `<hex>` pubkey. If the IP is
+not auto-detected, pass `LAN_IP=192.168.x.y make lan-demo`.
+
+## Queries and dashboards
+
+- `bin/agent status --name <id> ...` prints a machine-readable snapshot
+  (local key/endpoint, coordinator registry counters, per-peer path/RTT/rekeys)
+  and exits.
+- `bin/agent tui    --name <id> ...` opens the live terminal dashboard (same
+  fields, refreshed every second, RTT history).
+
+Both reuse the same flags as `up`/`ping` (`--coordinator`, `--coord-pubkey`,
+`--stun`, `--relay`, `--data`).
+
 ## Setup — public server (coordinator + relay)
 
 Simplest: a cheap VPS (cloud ~$5/month) + two different networks on the client
@@ -122,10 +155,13 @@ make tun-demo        # iki utun açar, host route'larla tünelden ICMP geçirir
 
 | Symptom | Possible cause | Fix |
 |---|---|---|
+| `make lan-demo`: STUN endpoint `127.0.0.1` | LAN IP detection picked a loopback address | `LAN_IP=<real LAN IP> make lan-demo` |
+| `make lan-demo`: can't detect IP | no active Wi-Fi/Ethernet interface | Pass `LAN_IP=...` explicitly |
 | STUN endpoint `127.0.0.1` | `--data 127.0.0.1:...` was used | `--data 0.0.0.0:19501` |
 | Handshake timeout (control) | `--coord-pubkey` wrong/missing | Copy the `<hex>` from the server log |
 | `ping`: no response | 19200/19201/19205 closed | Open the VPS security group |
 | `path=relay` but packet loss | inbound UDP from relay to client closed | Allow inbound UDP on 19501/19502 in the local firewall on machines A/B |
+| `agent status`: `registry_error: no control session` | coordinator down or wrong `--coord-pubkey` | Check `bin/coordinator` log and the key hex |
 | TUN ping 100% loss | `<peer>` overlay address inconsistent | `-tun-peer` must be symmetric on both sides |
 
 ## Security note

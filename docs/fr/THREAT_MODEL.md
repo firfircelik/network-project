@@ -47,6 +47,16 @@ Actifs :
 - **Rejeu :** retransmission d'un texte chiffré DATA enregistré. La fenêtre glissante
   de type WireGuard (2048) côté récepteur rejette les nonces anciens et les doublons
   → **atténué** (phase 2).
+- **DoS par état de rekey :** un datagramme usurpé avec un nonce sauvage qui fait
+  avancer les clés d'époque à sens unique avant l'authentification, verrouillant la
+  direction de réception jusqu'au prochain re-handshake. `DecryptAt` dérive désormais
+  la clé d'époque candidate sur un état de chiffrement jetable et n'applique le rekey
+  qu'après la vérification AEAD → **atténué**.
+- **DoS par handshake semi-ouvert :** un HS3 perdu laissait le répondant semi-ouvert
+  jusqu'à la durée de vie de session de 24 h. L'initiateur réémet désormais HS3
+  jusqu'à ce que le répondant réponde avec des données authentifiées, les HS1 en
+  double retransmettent le HS2 mis en cache au lieu de réinitialiser le répondant,
+  et l'état semi-ouvert périmé est purgé après un délai de 10 s → **atténué**.
 - **Déni de service/reflexion UDP :** amplification en revendiquant un nom auprès du relais ; des paquets
   avec adresses sources usurpées. L'épinglage nom→adresse + les limites pps/octets
   par source + le quota par nom sont actifs → **atténué** (phase 3).
@@ -95,7 +105,7 @@ Actifs :
 - Vérification du txid STUN.
 - Limites de taille dans les communications (contrôle `maxMsgLen`, enveloppes relais/nat), vérification
   de la validité des trames.
-- Contrat de taille de datagramme (plafond de texte clair 65507-3-16, le chemin relais est
+- Contrat de taille de datagramme (plafond de texte clair 65507-3-8-16 = 65480, le chemin relais est
   en plus resserré).
 - Délai d'écriture de diffusion du coordinateur ; lectures de contrôle bornées.
 - Tests unitaires propres sous `-race` ; fuzzers d'analyseurs ; démo de bout en bout ; workflow CI.

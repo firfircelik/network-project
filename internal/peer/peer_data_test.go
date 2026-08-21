@@ -195,3 +195,49 @@ func TestPeerDataFreshSessionResetsWindow(t *testing.T) {
 	mustRecv(t, p, []byte("new1"))
 	mustNotRecv(t, p) // nothing else may follow
 }
+
+// TestPeerStatusAccessors covers the snapshot plumbing used by `agent status`
+// and the TUI: rekey counting across session replacement, session age, the
+// direct endpoint and path reporting.
+func TestPeerStatusAccessors(t *testing.T) {
+	initKP, err := noisework.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair: %v", err)
+	}
+	respKP, err := noisework.GenerateKeypair()
+	if err != nil {
+		t.Fatalf("GenerateKeypair: %v", err)
+	}
+	_, s1Resp := handshakePair(t, initKP, respKP)
+	p := newInstallPeer(t, respKP, initKP, s1Resp)
+
+	if got := p.RekeyCount(); got != 0 {
+		t.Fatalf("RekeyCount after first session = %d, want 0", got)
+	}
+	if p.Path() != disco.PathDirect {
+		t.Fatalf("Path = %v, want direct", p.Path())
+	}
+	if p.SessionAge() <= 0 {
+		t.Fatalf("SessionAge = %v, want > 0", p.SessionAge())
+	}
+	if p.DirectEndpoint() != nil {
+		t.Fatalf("DirectEndpoint = %v, want nil before SetDirectEP", p.DirectEndpoint())
+	}
+
+	ep := &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 19302}
+	p.SetDirectEP(ep)
+	if got := p.DirectEndpoint(); got == nil || got.String() != ep.String() {
+		t.Fatalf("DirectEndpoint after SetDirectEP = %v, want %s", got, ep)
+	}
+
+	// A fresh handshake between the same identities replaces the live
+	// session: that is exactly one key rotation.
+	_, s2Resp := handshakePair(t, initKP, respKP)
+	p.mu.Lock()
+	p.setSessionLocked(s2Resp, disco.PathDirect)
+	p.mu.Unlock()
+
+	if got := p.RekeyCount(); got != 1 {
+		t.Fatalf("RekeyCount after replacement = %d, want 1", got)
+	}
+}

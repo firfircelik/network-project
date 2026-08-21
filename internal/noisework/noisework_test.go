@@ -610,6 +610,74 @@ func TestDecryptAtLossReorderAndRekey(t *testing.T) {
 	}
 }
 
+// TestDecryptAtSpoofedEpochJumpDoesNotAdvanceKeys is the regression test for
+// the rekey DoS: an unauthenticated frame whose nonce points into a future
+// epoch must fail AEAD WITHOUT advancing the one-way epoch keys, so the
+// receive direction stays able to open legitimate frames.
+func TestDecryptAtSpoofedEpochJumpDoesNotAdvanceKeys(t *testing.T) {
+	sInit, sResp := establishSessions(t)
+	const rekeyEvery = 4
+	sInit.rekeyEvery = rekeyEvery
+	sResp.rekeyEvery = rekeyEvery
+
+	// Spoofed datagram: a fresh (in-window) nonce one epoch ahead with
+	// garbage ciphertext. It must fail authentication...
+	if _, err := sResp.DecryptAt(rekeyEvery, make([]byte, 32)); err == nil {
+		t.Fatal("spoofed epoch-jump frame decrypted, want AEAD failure")
+	}
+	// ...and must not have advanced the one-way epoch keys.
+	if sResp.recvEpoch != 0 {
+		t.Fatalf("recvEpoch = %d after unauthenticated frame, want 0", sResp.recvEpoch)
+	}
+
+	// The legitimate epoch-0 frame must still open.
+	nonce, ct, err := sInit.Send([]byte("alive"))
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	pt, err := sResp.DecryptAt(nonce, ct)
+	if err != nil || !bytes.Equal(pt, []byte("alive")) {
+		t.Fatalf("legitimate frame after spoof: err=%v pt=%x", err, pt)
+	}
+
+	// A legitimate epoch jump still commits afterwards.
+	sInit.sendCount = rekeyEvery + 1
+	nonce, ct, err = sInit.Send([]byte("epoch one"))
+	if err != nil {
+		t.Fatalf("Send(epoch 1): %v", err)
+	}
+	pt, err = sResp.DecryptAt(nonce, ct)
+	if err != nil || !bytes.Equal(pt, []byte("epoch one")) {
+		t.Fatalf("epoch-jump frame after spoof: err=%v pt=%x", err, pt)
+	}
+	if sResp.recvEpoch != 1 {
+		t.Fatalf("recvEpoch = %d after authenticated jump, want 1", sResp.recvEpoch)
+	}
+}
+
+// TestDecryptAtSpoofedSameEpochLeavesStateIntact verifies that a failed AEAD
+// check within the current epoch does not disturb the live cipher state: the
+// next legitimate frame at any still-fresh nonce decrypts normally.
+func TestDecryptAtSpoofedSameEpochLeavesStateIntact(t *testing.T) {
+	sInit, sResp := establishSessions(t)
+
+	// Garbage at a fresh same-epoch nonce fails...
+	if _, err := sResp.DecryptAt(2, make([]byte, 32)); err == nil {
+		t.Fatal("spoofed same-epoch frame decrypted, want AEAD failure")
+	}
+	// ...and the in-order stream is unaffected.
+	for i := 0; i < 3; i++ {
+		ct, err := sInit.Encrypt([]byte{byte(i)})
+		if err != nil {
+			t.Fatalf("Encrypt(%d): %v", i, err)
+		}
+		pt, err := sResp.Decrypt(ct)
+		if err != nil || !bytes.Equal(pt, []byte{byte(i)}) {
+			t.Fatalf("Decrypt(%d) after spoof: err=%v pt=%x", i, err, pt)
+		}
+	}
+}
+
 // TestRekeyRotatesKeys verifies the rekey actually changes the active key: a
 // frame from an earlier epoch can no longer be opened once the receiver has
 // processed messages in a later epoch.

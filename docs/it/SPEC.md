@@ -88,8 +88,8 @@ Agent → Coor:
 
 Coor → Agent:
 ```json
-{"type":"hello","id":"a"}
 {"type":"peer_list","peers":[{"id":"a","pubkey":"<hex32>","endpoints":["..."]}]}
+{"type":"query_result","count":2,"total":5,"up":123,"peers":[...]}
 {"type":"error","msg":"..."}
 ```
 
@@ -110,7 +110,16 @@ Comportamento: dopo ogni register, il coordinator invia `peer_list` a TUTTI i pe
   tolleranza alla perdita.
 - Rekey periodico: rotazione delle chiavi ogni `RekeyEvery` (default 2^20) messaggi;
   tappo anti-DoS `maxEpochJump`; protezione contro l'esaurimento dei nonce e limite
-  di età della sessione.
+  di età della sessione. Il rekey lato ricevitore è **vincolato all'autenticazione**:
+  la chiave di epoca candidata viene derivata su uno stato di cifratura usa-e-getta
+  e applicata solo dopo il superamento del controllo AEAD della trama; un datagramma
+  non autenticato non può quindi far avanzare le chiavi di epoca a senso unico e
+  bloccare la direzione di ricezione.
+- Affidabilità dell'handshake: HS3 (l'unico messaggio di handshake senza ritrasmissione
+  integrata) viene riemesso dall'iniziatore finché il risponditore non risponde con una
+  trama DATA autenticata; un HS1 duplicato ricevuto mentre il risponditore è semi-aperto
+  ritrasmette l'HS2 in cache invece di azzerare l'handshake, e lo stato semi-aperto
+  obsoleto viene ripulito dopo un timeout di 10 s.
 - Keepalive: frame DATA vuoto dopo 10 s di silenzio (mapping NAT + liveness).
 
 ## 4. Contratti API dei pacchetti
@@ -153,7 +162,7 @@ func (s *Session) DecryptAt(nonce uint64, ciphertext []byte) ([]byte, error)  //
 func (s *Session) Decrypt(ciphertext []byte) ([]byte, error)    // canale di controllo: ricezione sequenziale
 func (s *Session) PeerStatic() []byte
 func (s *Session) ChannelBinding() []byte
-func (s *Session) MaxPlaintextLen() int  // plaintext massimo per singolo datagramma: 65507 (UDP IPv4 max) - 3 (hdr frame) - 16 (tag AEAD) = 65504; sul percorso relay diminuisce ulteriormente dell'header del relay
+func (s *Session) MaxPlaintextLen() int  // plaintext massimo per singolo datagramma: 65507 (UDP IPv4 max) - 3 (hdr frame) - 8 (nonce esplicito) - 16 (tag AEAD) = 65480; sul percorso relay diminuisce ulteriormente dell'header del relay
 
 type Initiator struct{}
 func NewInitiator(myStatic *Keypair, peerStatic []byte, prologue []byte) (*Initiator, error)
@@ -276,15 +285,21 @@ type Message struct {                    // singola struct, Type string
     Endpoints []string `json:"endpoints,omitempty"`
     Peers     []PeerInfo `json:"peers,omitempty"`
     Msg       string `json:"msg,omitempty"`
+    Count     int   `json:"count,omitempty"` // solo query_result
+    Total     int   `json:"total,omitempty"` // solo query_result
+    Up        int64 `json:"up,omitempty"`    // solo query_result
 }
 type PeerInfo struct {
     ID        string   `json:"id"`
     PubKey    string   `json:"pubkey"`
     Endpoints []string `json:"endpoints"`
 }
-const ( TypeRegister="register"; TypeHello="hello"; TypePeerList="peer_list"; TypeError="error" )
+const ( TypeRegister="register"; TypePeerList="peer_list"; TypeQuery="query"; TypeQueryResult="query_result"; TypeError="error" )
+const MaxControlLine = 64 << 10          // tetto per un messaggio di controllo su una riga (limite memoria anti-DoS)
+var ErrControlLineTooLong                // riga che supera MaxControlLine
 func EncodeLine(v any) ([]byte, error)            // JSON + "\n"
 func DecodeLine(b []byte) (*Message, error)
+func ReadLine(r *bufio.Reader) ([]byte, error)    // legge la riga senza accumularla; ErrControlLineTooLong se troppo lunga
 ```
 Test: roundtrip register/peer_list.
 
