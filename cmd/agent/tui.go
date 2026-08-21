@@ -97,11 +97,10 @@ func tuiLoop(ctx context.Context, app *tview.Application, a *agent.Agent, st *tu
 		snap := a.Status()
 		header.SetText(renderHeader(snap, reg, regOK))
 		renderTable(table, snap)
-		app.Draw()
 	}
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	render()
+	app.QueueUpdateDraw(render)
 	for {
 		select {
 		case <-ctx.Done():
@@ -155,6 +154,7 @@ func renderHeader(snap agent.Status, reg agent.CoordinatorStatus, regOK bool) st
 }
 
 func renderTable(table *tview.Table, snap agent.Status) {
+	table.Clear()
 	headers := []string{"Peer", "Direct EP", "Est.", "Path", "RTT", "RTT history", "Rekeys", "Age"}
 	for c, h := range headers {
 		table.SetCell(0, c, tview.NewTableCell(h).

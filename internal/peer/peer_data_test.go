@@ -229,6 +229,12 @@ func TestPeerStatusAccessors(t *testing.T) {
 	if got := p.DirectEndpoint(); got == nil || got.String() != ep.String() {
 		t.Fatalf("DirectEndpoint after SetDirectEP = %v, want %s", got, ep)
 	}
+	got := p.DirectEndpoint()
+	got.Port = 9999
+	got.IP[0] = 10
+	if again := p.DirectEndpoint(); again == nil || again.String() != ep.String() {
+		t.Fatalf("DirectEndpoint leaked internal pointer: got %v, want %s", again, ep)
+	}
 
 	// A fresh handshake between the same identities replaces the live
 	// session: that is exactly one key rotation.
