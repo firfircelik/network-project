@@ -61,3 +61,13 @@ ready; real-internet NAT test open). At the end of each phase `gofmt` / `go vet`
 - Live config rotation; cryptographic key store/KMS; Prometheus metrics;
   plaintext memory protection (mlock); WireGuard-like session timeouts;
   handshake/core function health status.
+
+## Ops tooling (post-v1 addendum)
+
+- ✅ `agent status --json`: machine-readable snapshot on stdout (logs on
+  stderr; durations as ms/s floats, `rtt_ms` null until sampled).
+- ✅ `agent status --probe-peer <id>`: pings one peer from the same instance
+  before snapshotting so path/RTT reflect a real, established tunnel.
+- ✅ Ecosystem: the JSON feed is ingested by
+  [HomeNetIQ](https://github.com/firfircelik/homenetiq) to score mesh health
+  (path/RTT/rekeys) in its self-hosted dashboard.

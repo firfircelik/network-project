@@ -34,9 +34,11 @@ not auto-detected, pass `LAN_IP=192.168.x.y make lan-demo`.
 
 ## Queries and dashboards
 
-- `bin/agent status --name <id> ...` prints a machine-readable snapshot
-  (local key/endpoint, coordinator registry counters, per-peer path/RTT/rekeys)
-  and exits.
+- `bin/agent status --name <id> ...` prints a one-shot snapshot (local
+  key/endpoint, coordinator registry counters, per-peer path/RTT/rekeys)
+  and exits. Add `--json` for a machine-readable JSON document on stdout
+  (logs stay on stderr) and `--probe-peer <id>` to ping one peer first so
+  the report contains a real path/RTT.
 - `bin/agent tui    --name <id> ...` opens the live terminal dashboard (same
   fields, refreshed every second, RTT history).
 
