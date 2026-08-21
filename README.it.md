@@ -1,5 +1,10 @@
 # meshlink
 
+[![CI](https://github.com/firfircelik/network-project/actions/workflows/ci.yml/badge.svg)](https://github.com/firfircelik/network-project/actions/workflows/ci.yml)
+![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 **🌐 Languages:** [English](README.md) · [Türkçe](README.tr.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Deutsch](README.de.md)
 
 VPN mesh P2P crittografata e in grado di attraversare i NAT, scritta in Go. Gli agent comunicano tramite tunnel crittografati Noise-XX, bucano i NAT con STUN + hole punching ad apertura simultanea e ripiegano su un relay quando un percorso diretto è impossibile — autosufficiente, con un simulatore NAT integrato, così l'intero stack gira su localhost senza root.
@@ -113,8 +118,6 @@ l'analisi richiede `tshark`). Su un'interfaccia reale la cattura richiede root:
 
 La CI esegue `gofmt` → `go vet` → `go test -race ./...` → `make demo` a ogni
 push su `main`:
-
-[![CI](https://github.com/firfircelik/network-project/actions/workflows/ci.yml/badge.svg)](https://github.com/firfircelik/network-project/actions/workflows/ci.yml)
 
 ## Documentazione
 

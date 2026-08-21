@@ -1,5 +1,10 @@
 # meshlink
 
+[![CI](https://github.com/firfircelik/network-project/actions/workflows/ci.yml/badge.svg)](https://github.com/firfircelik/network-project/actions/workflows/ci.yml)
+![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 **🌐 Languages:** [English](README.md) · [Türkçe](README.tr.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Deutsch](README.de.md)
 
 Verschlüsseltes, NAT-überwindendes P2P-Mesh-VPN in Go. Agents kommunizieren
@@ -122,8 +127,6 @@ Auf einer echten Schnittstelle erfordert die Aufzeichnung root:
 CI führt bei jedem Push auf `main` `gofmt` → `go vet` → `go test -race ./...`
 → `make demo` aus:
 
-[![CI](https://github.com/firfircelik/network-project/actions/workflows/ci.yml/badge.svg)](https://github.com/firfircelik/network-project/actions/workflows/ci.yml)
-
 ## Dokumentation
 
 | Doku | Inhalt |
@@ -136,11 +139,3 @@ CI führt bei jedem Push auf `main` `gofmt` → `go vet` → `go test -race ./..
 | [`docs/de/REALNET.md`](docs/de/REALNET.md) | Rezept zur Verifikation im realen Internet (VPS) |
 | [`docs/de/REVIEW.md`](docs/de/REVIEW.md) | Code-Review-Protokoll |
 
-## Status
-
-Phase 1 (CI, Fuzzing, Konfigurations-/Log-Hygiene) und Phase 2 (Replay-Fenster,
-Rekeying, Nonce-Schutz) sind abgeschlossen; Phase 3 (authentifizierte
-Kontrollebene, Relay-Pinning + Ratenlimits, Handshake-Budgets) ist
-abgeschlossen; Phase 4 (TUN-Brücke) ist implementiert und dokumentiert — der
-verbleibende Punkt ist die Verifikation im realen Internet (siehe
-`docs/de/REALNET.md`).

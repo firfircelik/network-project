@@ -1,5 +1,10 @@
 # meshlink
 
+[![CI](https://github.com/firfircelik/network-project/actions/workflows/ci.yml/badge.svg)](https://github.com/firfircelik/network-project/actions/workflows/ci.yml)
+![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 **🌐 Languages:** [English](README.md) · [Türkçe](README.tr.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Deutsch](README.de.md)
 
 VPN maillé P2P chiffré avec traversée de NAT, écrit en Go. Les agents échangent
@@ -118,8 +123,6 @@ l'analyse nécessite `tshark`). Sur une interface réelle, la capture exige root
 
 La CI exécute `gofmt` → `go vet` → `go test -race ./...` → `make demo` à chaque
 push sur `main` :
-
-[![CI](https://github.com/firfircelik/network-project/actions/workflows/ci.yml/badge.svg)](https://github.com/firfircelik/network-project/actions/workflows/ci.yml)
 
 ## Documentation
 
