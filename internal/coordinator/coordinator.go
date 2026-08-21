@@ -224,6 +224,7 @@ func (s *Server) cleanupConn(conn net.Conn) {
 			// Only drop the registration when this very conn still owns it;
 			// a re-registration from a newer conn supersedes the owner.
 			delete(s.registrations, id)
+			s.log.Printf("peer removed: id=%s", id)
 		}
 	}
 	delete(s.clients, conn)
@@ -330,6 +331,8 @@ func (s *Server) handleClient(ctx context.Context, conn net.Conn) {
 		// refused so an attacker cannot squat an existing peer's name.
 		if cur, ok := s.registrations[msg.ID]; ok && cur.PubKey != "" && cur.PubKey != msg.PubKey {
 			s.mu.Unlock()
+			s.log.Printf("registration refused: id=%s remote=%s reason=name-taken-with-different-key",
+				msg.ID, conn.RemoteAddr())
 			s.writeMsg(conn, protocol.Message{Type: protocol.TypeError, Msg: "id already registered with a different key"})
 			continue
 		}
@@ -347,6 +350,8 @@ func (s *Server) handleClient(ctx context.Context, conn net.Conn) {
 		}
 		s.clients[conn] = msg.ID
 		s.totalRegs++
+		s.log.Printf("peer registered: id=%s remote=%s endpoints=%d total_regs=%d",
+			msg.ID, conn.RemoteAddr(), len(msg.Endpoints), s.totalRegs)
 		// Broadcast the full current peer list to everybody (including sender).
 		peers := make([]protocol.PeerInfo, 0, len(s.registrations))
 		for _, r := range s.registrations {
