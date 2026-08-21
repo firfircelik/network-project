@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -27,12 +28,13 @@ import (
 type Config struct {
 	Name        string
 	Keyfile     string
-	Coordinator string // TCP host:port of the control plane
-	CoordKey    string // hex public key of the coordinator (control-plane pin)
-	StunAddr    string // UDP host:port of the STUN endpoint (coordinator)
-	RelayAddr   string // UDP host:port of the relay server ("" = disabled)
-	DataAddr    string // local UDP bind address for the data plane
-	NatDoor     string // optional: the local natbox "inside door" to egress through
+	Coordinator string    // TCP host:port of the control plane
+	CoordKey    string    // hex public key of the coordinator (control-plane pin)
+	StunAddr    string    // UDP host:port of the STUN endpoint (coordinator)
+	RelayAddr   string    // UDP host:port of the relay server ("" = disabled)
+	DataAddr    string    // local UDP bind address for the data plane
+	NatDoor     string    // optional: the local natbox "inside door" to egress through
+	LogWriter   io.Writer // where slog output goes (defaults to os.Stdout)
 
 	TunName  string            // TUN device to open (requires root; "" = disabled)
 	TunMTU   int               // TUN MTU (default 1500 when enabled)
@@ -65,7 +67,16 @@ type Agent struct {
 	pingMu    sync.Mutex
 	pingOut   map[uint64]chan time.Time
 	closeOnce sync.Once
+
+	rttMu   sync.Mutex
+	lastRTT map[string]time.Duration
+	rttHist map[string][]time.Duration // most recent first, capped at rttHistoryDepth
+
+	queryCh chan *protocol.Message // TypeQueryResult deliveries from ctrlReaderLoop
 }
+
+// rttHistoryDepth bounds the per-peer RTT history kept for dashboards.
+const rttHistoryDepth = 5
 
 // New loads (or creates) the keypair and prepares the data socket.
 func New(cfg Config) (*Agent, error) {
@@ -77,14 +88,21 @@ func New(cfg Config) (*Agent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bind data socket: %w", err)
 	}
+	writer := cfg.LogWriter
+	if writer == nil {
+		writer = os.Stdout
+	}
 	a := &Agent{
 		cfg:        cfg,
-		log:        slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})).With("name", cfg.Name),
+		log:        slog.New(slog.NewTextHandler(writer, &slog.HandlerOptions{Level: slog.LevelInfo})).With("name", cfg.Name),
 		kp:         kp,
 		conn:       conn.(*net.UDPConn),
 		peers:      make(map[string]*peer.Peer),
 		peerCancel: make(map[string]context.CancelFunc),
 		pingOut:    make(map[uint64]chan time.Time),
+		lastRTT:    make(map[string]time.Duration),
+		rttHist:    make(map[string][]time.Duration),
+		queryCh:    make(chan *protocol.Message, 1),
 	}
 	if cfg.NatDoor != "" {
 		a.door, err = net.ResolveUDPAddr("udp", cfg.NatDoor)
@@ -258,6 +276,11 @@ func (a *Agent) ctrlReaderLoop(ctx context.Context, ctrl *control.Conn) {
 		switch msg.Type {
 		case protocol.TypePeerList:
 			a.applyPeers(msg.Peers)
+		case protocol.TypeQueryResult:
+			select {
+			case a.queryCh <- msg:
+			default: // no waiter: drop rather than block the control loop
+			}
 		case protocol.TypeError:
 			a.log.Warn("coordinator error", "msg", msg.Msg)
 		}
@@ -648,7 +671,9 @@ func (a *Agent) receiveLoop(ctx context.Context) {
 			}
 		} else {
 			for _, p := range a.peers {
-				if p.DirectEP != nil && extSrc.String() == p.DirectEP.String() {
+				// DirectEndpoint reads the pointer under the peer's own lock;
+				// the agent lock alone does not guard it.
+				if ep := p.DirectEndpoint(); ep != nil && extSrc.String() == ep.String() {
 					matched = p
 					break
 				}

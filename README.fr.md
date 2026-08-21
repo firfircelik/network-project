@@ -92,6 +92,30 @@ make demo          # démo de bout en bout avec NAT simulé (sans root)
 make tun-demo      # bout en bout TUN réel sur macOS/Linux (root ; ré-exécution via sudo)
 ```
 
+### Mesure de perte sur le fil (retransmissions)
+
+Les hash de fichiers peuvent correspondre pendant que la pile TCP retransmet
+pourtant sur le fil. Pour le mesurer directement au lieu de le déduire,
+capturez le transfert N fois et comptez les événements d'analyse des
+retransmissions TCP :
+
+```sh
+RETX_IFACE=en0 \
+  RETX_RUNS=10 \
+  RETX_TRANSFER='curl -sfS -o /dev/null https://host/a.bin' \
+  scripts/retx-check.sh
+```
+
+Affiche une ligne par passage (`wall`/`cap` durée, `MB`, compteurs
+`retx`/`fast`/`spur`/`dup`/`ooo`/`lost`, RTT ACK moyen) et sort avec `0`
+seulement lorsqu'**aucun** paquet ne montre d'indicateur de
+retransmission/réordonnancement/perte — un résultat propre au niveau du fil,
+non inféré. `RETX_CAP_FILTER` restreint la capture aux points d'extrémité du
+transfert. Les captures existantes peuvent être ré-analysées avec
+`scripts/retx-check.sh --analyze <dir>` (la capture peut utiliser `tcpdump` ;
+l'analyse nécessite `tshark`). Sur une interface réelle, la capture exige root :
+`sudo env RETX_IFACE=en0 RETX_TRANSFER='curl -sfS -o /dev/null https://host/a.bin' scripts/retx-check.sh`.
+
 La CI exécute `gofmt` → `go vet` → `go test -race ./...` → `make demo` à chaque
 push sur `main` :
 

@@ -32,6 +32,9 @@ localhost without root.
   verified with `make tun-demo`.
 - **NAT simulator** — `internal/nat` models full-cone, address-restricted and
   symmetric behaviors for reproducible local testing.
+- **Operations UX** — a one-shot `agent status` snapshot (peers, path, RTT,
+  rekey counters, coordinator registry) and a live `agent tui` dashboard, plus
+  `make lan-demo` for a VPS-free two-device check on the same Wi-Fi/LAN.
 
 ## Quickstart
 
@@ -83,14 +86,62 @@ NAT boxes (directly reachable sockets). Without a NAT in the path the data
 socket must be bound to `0.0.0.0` (`--data 0.0.0.0:19501`) so STUN sees a
 real source address — see `docs/TUN.md` / `docs/REALNET.md`.
 
+### Two devices on the same Wi-Fi/LAN (no VPS)
+
+```sh
+make lan-demo
+```
+
+Starts coordinator + relay locally, binds both agent sockets to `0.0.0.0` and
+pings through the real LAN/wireless interface (`path=direct`). It prints the
+exact commands to copy onto a second device.
+
+### Observing the mesh
+
+```sh
+# one-shot snapshot: local key/endpoint, coordinator registry, per-peer
+# established/path/RTT/rekey counters — readable by scripts and humans
+bin/agent status --name b --keyfile key.b --data 0.0.0.0:19502 \
+  --coordinator 127.0.0.1:19200 --coord-pubkey <hex> \
+  --stun 127.0.0.1:19201 --relay 127.0.0.1:19205
+
+# live terminal dashboard: same fields, refreshed every second, RTT history
+bin/agent tui --name b --keyfile key.b --data 0.0.0.0:19502 \
+  --coordinator 127.0.0.1:19200 --coord-pubkey <hex> \
+  --stun 127.0.0.1:19201 --relay 127.0.0.1:19205
+```
+
 ## Tests
 
 ```sh
 make test          # go test -race ./internal/...
 make fuzz-smoke    # 10s parser fuzz per package (record, relay, nat, stun, protocol)
 make demo          # simulated-NAT end-to-end demo (no root)
+make lan-demo      # real direct path over the LAN/Wi-Fi interface (no root, no VPS)
 make tun-demo      # real TUN end-to-end on macOS/Linux (root; re-execs via sudo)
 ```
+
+### Measuring wire-level loss (retransmissions)
+
+File hashes can match while the TCP stack still retransmits on the wire. To
+measure that directly instead of inferring it, capture the transfer N times and
+count TCP retransmission-analysis events:
+
+```sh
+RETX_IFACE=en0 \
+  RETX_RUNS=10 \
+  RETX_TRANSFER='curl -sfS -o /dev/null https://host/a.bin' \
+  scripts/retx-check.sh
+```
+
+Prints one row per run (`wall`/`cap` duration, `MB`, `retx`/`fast`/`spur`/
+`dup`/`ooo`/`lost` counters, average ACK RTT) and exits `0` only when **zero**
+packets show retransmission/reordering/loss indicators — a wire-level clean
+result, not an inferred one. `RETX_CAP_FILTER` narrows the capture to the
+transfer endpoints. Existing captures can be re-analyzed with
+`scripts/retx-check.sh --analyze <dir>` (capture falls back to `tcpdump`;
+analysis needs `tshark`). On a real interface the capture needs root:
+`sudo env RETX_IFACE=en0 RETX_TRANSFER='curl -sfS -o /dev/null https://host/a.bin' scripts/retx-check.sh`.
 
 CI runs `gofmt` → `go vet` → `go test -race ./...` → `make demo` on every
 push to `main`:

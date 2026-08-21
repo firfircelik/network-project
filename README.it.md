@@ -88,6 +88,29 @@ make demo          # demo end-to-end con NAT simulati (senza root)
 make tun-demo      # TUN reale end-to-end su macOS/Linux (root; ri-esegue tramite sudo)
 ```
 
+### Misura della perdita a livello di rete (ritrasmissioni)
+
+Gli hash dei file possono corrispondere mentre lo stack TCP ritrasmette ancora
+sul cavo. Per misurarlo direttamente invece di dedurlo, cattura il trasferimento
+N volte e conta gli eventi di analisi delle ritrasmissioni TCP:
+
+```sh
+RETX_IFACE=en0 \
+  RETX_RUNS=10 \
+  RETX_TRANSFER='curl -sfS -o /dev/null https://host/a.bin' \
+  scripts/retx-check.sh
+```
+
+Stampa una riga per esecuzione (durata `wall`/`cap`, `MB`, contatori
+`retx`/`fast`/`spur`/`dup`/`ooo`/`lost`, RTT ACK medio) ed esce con `0` solo
+quando **nessun** pacchetto mostra indicatori di
+ritrasmissione/riordino/perdita — un risultato pulito a livello di rete, non
+dedotto. `RETX_CAP_FILTER` restringe la cattura agli endpoint del trasferimento.
+Le catture esistenti possono essere ri-analizzate con
+`scripts/retx-check.sh --analyze <dir>` (la cattura può usare `tcpdump`;
+l'analisi richiede `tshark`). Su un'interfaccia reale la cattura richiede root:
+`sudo env RETX_IFACE=en0 RETX_TRANSFER='curl -sfS -o /dev/null https://host/a.bin' scripts/retx-check.sh`.
+
 La CI esegue `gofmt` → `go vet` → `go test -race ./...` → `make demo` a ogni
 push su `main`:
 

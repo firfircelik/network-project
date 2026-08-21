@@ -45,6 +45,17 @@ Varlıklar:
 - **Tekrar (Replay):** kaydedilmiş DATA ciphertext'inin yeniden iletilmesi.
   Alıcıdaki WireGuard tarzı kayan pencere (2048) eski nonce'ları ve yinelenenleri
   reddeder → **azaltıldı** (Faz 2).
+- **Rekey-durumu DoS'u:** sahte bir datagramın, kimlik doğrulamasından önce
+  tek yönlü epoch anahtarlarını ilerleterek alma yönünü bir sonraki el sıkışmaya
+  kadar kilitlemesi. `DecryptAt` artık aday epoch anahtarını tek kullanımlık bir
+  cipher state üzerinde türetiyor ve rekey'i yalnızca AEAD kontrolü geçtikten
+  sonra uyguluyor → **azaltıldı**.
+- **Yarı-açık el sıkışma DoS'u:** kaybolan bir HS3, yanıtlayıcıyı 24 saatlik
+  oturum yaşına kadar yarı-açık bırakabiliyordu. İnisiyatör artık yanıtlayıcı
+  kimlik doğrulamalı veriyle cevap verene kadar HS3'ü yeniden gönderiyor,
+  yinelenen HS1'ler yanıtlayıcıyı sıfırlamak yerine önbellekteki HS2'yi yeniden
+  iletiyor ve bayat yarı-açık durum 10 sn'lik zaman aşımından sonra temizleniyor
+  → **azaltıldı**.
 - **UDP DoS/yansıma (reflection):** relay'e bir isim sahiplenerek amplifikasyon;
   sahte kaynak adresli paketler. İsim→adres sabitleme + kaynak başına pps/byte
   limitleri + isim başına kota etkindir → **azaltıldı** (Faz 3).
@@ -93,7 +104,7 @@ Varlıklar:
 - STUN txid doğrulaması.
 - İletişimde boyut limitleri (kontrol `maxMsgLen`, relay/nat zarfı), çerçeve
   geçerlilik kontrolü.
-- Datagram boyut sözleşmesi (65507-3-16 düz metin tavanı, relay yolu ek olarak
+- Datagram boyut sözleşmesi (65507-3-8-16 = 65480 düz metin tavanı, relay yolu ek olarak
   sıkılaştırılmıştır).
 - Koordinatör yayın yazma zaman aşımı; sınırlı kontrol okumaları.
 - `-race`-temiz birim testleri; ayrıştırıcı fuzz'ları; uçtan uca demo; CI iş akışı.

@@ -88,8 +88,8 @@ Agent → Koordinator:
 
 Koordinator → Agent:
 ```json
-{"type":"hello","id":"a"}
 {"type":"peer_list","peers":[{"id":"a","pubkey":"<hex32>","endpoints":["..."]}]}
+{"type":"query_result","count":2,"total":5,"up":123,"peers":[...]}
 {"type":"error","msg":"..."}
 ```
 
@@ -113,7 +113,17 @@ Peers (einschließlich des Absenders). Wenn es keine Peers gibt, ist
   doppelter/veralteter Nonces, Verlusttoleranz.
 - Periodisches Rekeying: Schlüsselrotation alle `RekeyEvery` (Standard 2^20)
   Nachrichten; `maxEpochJump`-DoS-Obergrenze; Nonce-Erschöpfungs-Guard und
-  Sitzungsalterslimit.
+  Sitzungsalterslimit. Das empfängerseitige Rekey ist
+  **authentifizierungsgeschützt**: der Epochenschlüssel-Kandidat wird auf einem
+  Wegwerf-Cipher-State abgeleitet und erst übernommen, wenn die AEAD-Prüfung des
+  Frames besteht; ein nicht authentifiziertes Datagramm kann die Einweg-Epochen-
+  schlüssel daher nicht vorschieben und die Empfangsrichtung sperren.
+- Handshake-Zuverlässigkeit: HS3 (die einzige Handshake-Nachricht ohne
+  eingebaute Wiederholung) wird vom Initiator erneut gesendet, bis der Responder
+  mit einem authentifizierten DATA-Frame antwortet; ein doppeltes HS1 bei
+  halboffenem Responder sendet das gecachte HS2 erneut statt den Handshake
+  zurückzusetzen, und veralteter halboffener Zustand wird nach 10 s Timeout
+  geräumt.
 - Keepalive: leerer DATA-Frame nach 10 s Stille (NAT-Mapping +
   Erreichbarkeit).
 
@@ -157,7 +167,7 @@ func (s *Session) DecryptAt(nonce uint64, ciphertext []byte) ([]byte, error)  //
 func (s *Session) Decrypt(ciphertext []byte) ([]byte, error)    // kontrol kanalı: sıralı recv
 func (s *Session) PeerStatic() []byte
 func (s *Session) ChannelBinding() []byte
-func (s *Session) MaxPlaintextLen() int  // en büyük tek-datagram plaintext'i: 65507 (max IPv4 UDP) - 3 (frame hdr) - 16 (AEAD tag) = 65504; relay yolunda ayrıca relay başlığı kadar azalır
+func (s *Session) MaxPlaintextLen() int  // en büyük tek-datagram plaintext'i: 65507 (max IPv4 UDP) - 3 (frame hdr) - 8 (açık nonce) - 16 (AEAD tag) = 65480; relay yolunda ayrıca relay başlığı kadar azalır
 
 type Initiator struct{}
 func NewInitiator(myStatic *Keypair, peerStatic []byte, prologue []byte) (*Initiator, error)
@@ -285,15 +295,21 @@ type Message struct {                    // tek struct, Type string
     Endpoints []string `json:"endpoints,omitempty"`
     Peers     []PeerInfo `json:"peers,omitempty"`
     Msg       string `json:"msg,omitempty"`
+    Count     int   `json:"count,omitempty"` // nur query_result
+    Total     int   `json:"total,omitempty"` // nur query_result
+    Up        int64 `json:"up,omitempty"`    // nur query_result
 }
 type PeerInfo struct {
     ID        string   `json:"id"`
     PubKey    string   `json:"pubkey"`
     Endpoints []string `json:"endpoints"`
 }
-const ( TypeRegister="register"; TypeHello="hello"; TypePeerList="peer_list"; TypeError="error" )
+const ( TypeRegister="register"; TypePeerList="peer_list"; TypeQuery="query"; TypeQueryResult="query_result"; TypeError="error" )
+const MaxControlLine = 64 << 10          // Obergrenze für eine einzelne Kontrollnachricht (Speicher-DoS-Deckel)
+var ErrControlLineTooLong                // Zeile überschreitet MaxControlLine
 func EncodeLine(v any) ([]byte, error)            // JSON + "\n"
 func DecodeLine(b []byte) (*Message, error)
+func ReadLine(r *bufio.Reader) ([]byte, error)    // liest die Zeile ohne Akkumulation; ErrControlLineTooLong bei Überlänge
 ```
 Test: register/peer_list-Roundtrip.
 

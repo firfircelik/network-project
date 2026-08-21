@@ -22,3 +22,5 @@ jobs:
         run: go test -race -timeout 20m ./...
       - name: demo
         run: make demo
+      - name: lan-demo
+        run: make lan-demo

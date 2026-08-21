@@ -86,10 +86,17 @@ Agent → Coor:
 
 Coor → Agent:
 ```json
-{"type":"hello","id":"a"}
 {"type":"peer_list","peers":[{"id":"a","pubkey":"<hex32>","endpoints":["..."]}]}
+{"type":"query_result","count":2,"total":5,"up":123,"peers":[...]}
 {"type":"error","msg":"..."}
 ```
+
+Agent → Coor (additionally):
+```json
+{"type":"query"}
+```
+`query` asks for a registry snapshot (`query_result` answers it with the peer
+list plus count/total/uptime).
 
 Behavior: after every register, the coordinator sends `peer_list` to ALL peers (including the sender).
 `peer_list` is an empty array if there are no peers.
@@ -110,10 +117,19 @@ Behavior: after every register, the coordinator sends `peer_list` to ALL peers (
 - Periodic rekey: key rotation every `RekeyEvery` (default 2^20) messages;
   `maxEpochJump` DoS cap; nonce-exhaustion guard. Reorder tolerance spans frames
   *within* a rekey epoch; a frame lagging a full epoch cannot be recovered because
-  epoch keys advance one-way (deterministic drop — documented behavior).
+  epoch keys advance one-way (deterministic drop — documented behavior). The
+  receive-side rekey is **authentication-gated**: the candidate epoch key is
+  derived on a throwaway cipher state and committed only after the frame's AEAD
+  check passes, so an unauthenticated datagram cannot advance the one-way epoch
+  keys and lock the receive direction.
 - Session age limit: a session's key material is dropped and the tunnel
   re-handshakes after 24 h (`sessionMaxAge`), rotating keys on an absolute timer
   as well as by message count.
+- Handshake reliability: HS3 (the only handshake message without a built-in
+  retry) is re-emitted by the initiator until the responder answers with an
+  authenticated DATA frame; a duplicate HS1 received while the responder is
+  half-open retransmits the cached HS2 instead of resetting the handshake, and
+  half-open responder state is cleared after a 10 s timeout.
 - Keepalive: empty DATA frame after 10 s of silence (NAT mapping + liveness).
 
 ## 4. Package API contracts
@@ -155,7 +171,7 @@ func (s *Session) DecryptAt(nonce uint64, ciphertext []byte) ([]byte, error)  //
 func (s *Session) Decrypt(ciphertext []byte) ([]byte, error)    // kontrol kanalı: sıralı recv
 func (s *Session) PeerStatic() []byte
 func (s *Session) ChannelBinding() []byte
-func (s *Session) MaxPlaintextLen() int  // en büyük tek-datagram plaintext'i: 65507 (max IPv4 UDP) - 3 (frame hdr) - 16 (AEAD tag) = 65504; relay yolunda ayrıca relay başlığı kadar azalır
+func (s *Session) MaxPlaintextLen() int  // en büyük tek-datagram plaintext'i: 65507 (max IPv4 UDP) - 3 (frame hdr) - 8 (açık nonce) - 16 (AEAD tag) = 65480; relay yolunda ayrıca relay başlığı kadar azalır
 
 type Initiator struct{}
 func NewInitiator(myStatic *Keypair, peerStatic []byte, prologue []byte) (*Initiator, error)
@@ -268,15 +284,21 @@ type Message struct {                    // tek struct, Type string
     Endpoints []string `json:"endpoints,omitempty"`
     Peers     []PeerInfo `json:"peers,omitempty"`
     Msg       string `json:"msg,omitempty"`
+    Count     int   `json:"count,omitempty"` // query_result only
+    Total     int   `json:"total,omitempty"` // query_result only
+    Up        int64 `json:"up,omitempty"`    // query_result only
 }
 type PeerInfo struct {
     ID        string   `json:"id"`
     PubKey    string   `json:"pubkey"`
     Endpoints []string `json:"endpoints"`
 }
-const ( TypeRegister="register"; TypeHello="hello"; TypePeerList="peer_list"; TypeError="error" )
+const ( TypeRegister="register"; TypePeerList="peer_list"; TypeQuery="query"; TypeQueryResult="query_result"; TypeError="error" )
+const MaxControlLine = 64 << 10          // tek satır kontrol mesajı tavanı (bellek DoS kapağı)
+var ErrControlLineTooLong                // MaxControlLine aşan satır
 func EncodeLine(v any) ([]byte, error)            // JSON + "\n"
 func DecodeLine(b []byte) (*Message, error)
+func ReadLine(r *bufio.Reader) ([]byte, error)    // satırı biriktirmeden okur; uzun satırda ErrControlLineTooLong
 ```
 Test: register/peer_list roundtrip.
 
