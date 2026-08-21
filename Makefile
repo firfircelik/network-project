@@ -6,7 +6,7 @@ BINS := bin/coordinator bin/relay bin/natbox bin/agent
 # anywhere (internal/ + cmd/) trigger a rebuild.
 GOFILES := $(shell find cmd internal -name '*.go' -type f)
 
-.PHONY: all build test vet fmt clean demo tun-demo fuzz-smoke
+.PHONY: all build test vet fmt clean demo lan-demo tun-demo fuzz-smoke
 
 all: build
 
@@ -43,6 +43,12 @@ clean:
 demo: build
 	./scripts/demo.sh
 
+# LAN demo — real direct path over the Wi-Fi/LAN interface, no VPS. Detects the
+# machine's LAN IP automatically (override with LAN_IP=...). Prints the exact
+# commands to reproduce on a second device on the same Wi-Fi/LAN.
+lan-demo: build
+	./scripts/lan-demo.sh
+
 # TUN end-to-end verification (requires root; re-execs via sudo).
 tun-demo: build
 	./scripts/tun-demo.sh
@@ -50,7 +56,7 @@ tun-demo: build
 # Short fuzz smoke over every parser package. go test only accepts -fuzz for a
 # single package and a single explicit function, so iterate over each
 # package/function pair (10s each).
-FUZZ_PKGS := ./internal/record ./internal/relay ./internal/nat ./internal/stun ./internal/protocol
+FUZZ_PKGS := ./internal/record ./internal/relay ./internal/nat ./internal/stun ./internal/protocol ./internal/noisework
 fuzz-smoke:
 	@set -e; \
 	for pkg in $(FUZZ_PKGS); do \

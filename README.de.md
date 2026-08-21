@@ -95,6 +95,30 @@ make demo          # simulated-NAT end-to-end demo (no root)
 make tun-demo      # real TUN end-to-end on macOS/Linux (root; re-execs via sudo)
 ```
 
+### Verlustmessung auf der Leitung (Wiederholungen)
+
+Datei-Hashes können übereinstimmen, während der TCP-Stack dennoch auf der
+Leitung wiederholt. Um das direkt zu messen statt zu folgern, den Transfer
+N-mal aufzeichnen und die TCP-Wiederholungs-Analyseereignisse zählen:
+
+```sh
+RETX_IFACE=en0 \
+  RETX_RUNS=10 \
+  RETX_TRANSFER='curl -sfS -o /dev/null https://host/a.bin' \
+  scripts/retx-check.sh
+```
+
+Gibt pro Durchlauf eine Zeile aus (`wall`/`cap`-Dauer, `MB`, Zähler
+`retx`/`fast`/`spur`/`dup`/`ooo`/`lost`, durchschnittliche ACK-RTT) und endet
+nur mit `0`, wenn **kein** Paket Wiederholungs-/Neuordnungs-/Verlustanzeichen
+zeigt — ein sauberes Ergebnis auf Leitungsebene, nicht gefolgert.
+`RETX_CAP_FILTER` begrenzt die Aufzeichnung auf die Transfer-Endpunkte.
+Vorhandene Aufzeichnungen lassen sich mit
+`scripts/retx-check.sh --analyze <dir>` erneut analysieren (die Aufzeichnung
+kann auf `tcpdump` zurückfallen; für die Analyse wird `tshark` benötigt).
+Auf einer echten Schnittstelle erfordert die Aufzeichnung root:
+`sudo env RETX_IFACE=en0 RETX_TRANSFER='curl -sfS -o /dev/null https://host/a.bin' scripts/retx-check.sh`.
+
 CI führt bei jedem Push auf `main` `gofmt` → `go vet` → `go test -race ./...`
 → `make demo` aus:
 

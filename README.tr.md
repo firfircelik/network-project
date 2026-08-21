@@ -92,6 +92,30 @@ make demo          # simulated-NAT end-to-end demo (no root)
 make tun-demo      # real TUN end-to-end on macOS/Linux (root; re-execs via sudo)
 ```
 
+### Telde kayıp ölçümü (yeniden iletim)
+
+Dosya hash'leri eşleştiğinde transfer "kayıpsız" görünebilir, ama TCP yığını
+telde yine de yeniden iletim yapıyor olabilir. Bunu çıkarım yapmak yerine
+doğrudan ölçmek için transferi N kez yakalayıp TCP yeniden-iletim analiz
+olaylarını sayın:
+
+```sh
+RETX_IFACE=en0 \
+  RETX_RUNS=10 \
+  RETX_TRANSFER='curl -sfS -o /dev/null https://host/a.bin' \
+  scripts/retx-check.sh
+```
+
+Her koşu için bir satır basar (`wall`/`cap` süresi, `MB`, `retx`/`fast`/`spur`/
+`dup`/`ooo`/`lost` sayaçları, ortalama ACK RTT) ve yalnızca paketlerin
+**hiçbirinde** yeniden iletim/sıralama/kayıp belirtisi yoksa `0` ile çıkar —
+tel düzeyinde temiz sonuç, çıkarım değil. `RETX_CAP_FILTER` yakalamayı transfer
+uç noktalarına daraltır. Mevcut yakalamalar
+`scripts/retx-check.sh --analyze <dir>` ile yeniden analiz edilebilir
+(yakalama `tcpdump`'a düşebilir; analiz için `tshark` gerekir). Gerçek bir
+arayüzde yakalama root ister:
+`sudo env RETX_IFACE=en0 RETX_TRANSFER='curl -sfS -o /dev/null https://host/a.bin' scripts/retx-check.sh`.
+
 CI, `main` dalına her push'ta `gofmt` → `go vet` → `go test -race ./...` → `make demo`
 çalıştırır:
 

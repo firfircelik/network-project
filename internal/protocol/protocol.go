@@ -16,6 +16,12 @@ const (
 	TypeRegister = "register"
 	// TypePeerList carries the full set of known peers (coordinator -> agent).
 	TypePeerList = "peer_list"
+	// TypeQuery asks the coordinator for a registry snapshot (agent ->
+	// coordinator). Only authenticated control sessions may query.
+	TypeQuery = "query"
+	// TypeQueryResult carries the registry snapshot requested by TypeQuery
+	// (coordinator -> agent).
+	TypeQueryResult = "query_result"
 	// TypeError carries a control-plane error.
 	TypeError = "error"
 
@@ -44,6 +50,14 @@ type Message struct {
 	Endpoints []string   `json:"endpoints,omitempty"`
 	Peers     []PeerInfo `json:"peers,omitempty"`
 	Msg       string     `json:"msg,omitempty"`
+
+	// Registry snapshot fields, present only in TypeQueryResult:
+	// Count is the number of peers currently registered, Total counts every
+	// registration served since the coordinator started, and Up is the
+	// coordinator uptime in seconds.
+	Count int   `json:"count,omitempty"`
+	Total int   `json:"total,omitempty"`
+	Up    int64 `json:"up,omitempty"`
 }
 
 // EncodeLine marshals v to JSON and appends a trailing newline.

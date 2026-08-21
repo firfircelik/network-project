@@ -30,30 +30,81 @@ func LoadOrCreateKeyfile(path string) (*Keypair, error) {
 	if path == "" {
 		return nil, errors.New("noisework: keyfile path is required")
 	}
-	data, err := os.ReadFile(path)
+	kp, err := loadKeyfile(path)
 	if err == nil {
-		// Trim surrounding whitespace so a file written with a trailing
-		// newline (e.g. via echo) still parses.
-		priv, perr := hex.DecodeString(strings.TrimSpace(string(data)))
-		if perr == nil && len(priv) == KeySize {
-			kp, kerr := keypairFromPrivate(priv)
-			if kerr == nil {
-				return kp, nil
-			}
-		}
-		// The file exists but does not hold a usable key: fail loudly rather
-		// than silently rotating this node's long-term identity (which would
-		// break coordinator/agent key pinning).
-		return nil, fmt.Errorf("noisework: existing keyfile %s is corrupt: %w", path, err)
+		return kp, nil
 	}
-	if !os.IsNotExist(err) {
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	// The file does not exist yet: generate a key and claim the path with
+	// O_EXCL so two concurrent first starts cannot both write (last writer
+	// wins would silently rotate one node's long-term identity and break
+	// coordinator/agent key pinning).
+	fresh, cerr := createKeyfile(path)
+	if cerr == nil {
+		return fresh, nil
+	}
+	if !errors.Is(cerr, os.ErrExist) {
+		return nil, cerr
+	}
+	// Lost the creation race: another process wrote the file meanwhile. Retry
+	// briefly in case it was still mid-write when we observed it.
+	for i := 0; i < 20; i++ {
+		time.Sleep(50 * time.Millisecond)
+		kp, err := loadKeyfile(path)
+		if err == nil {
+			return kp, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("noisework: keyfile %s was created concurrently but never became readable", path)
+}
+
+// loadKeyfile reads and validates an existing keyfile. It returns an error
+// wrapping os.ErrNotExist when the file does not exist, and a descriptive
+// "corrupt" error when it exists but does not hold a usable key (callers must
+// fail loudly instead of silently rotating the node's long-term identity).
+func loadKeyfile(path string) (*Keypair, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
 		return nil, fmt.Errorf("noisework: read keyfile %s: %w", path, err)
 	}
+	// Trim surrounding whitespace so a file written with a trailing
+	// newline (e.g. via echo) still parses.
+	priv, perr := hex.DecodeString(strings.TrimSpace(string(data)))
+	if perr != nil {
+		return nil, fmt.Errorf("noisework: existing keyfile %s is corrupt: %w", path, perr)
+	}
+	if len(priv) != KeySize {
+		return nil, fmt.Errorf("noisework: existing keyfile %s is corrupt: private key must be %d bytes, got %d", path, KeySize, len(priv))
+	}
+	kp, kerr := keypairFromPrivate(priv)
+	if kerr != nil {
+		return nil, fmt.Errorf("noisework: existing keyfile %s is corrupt: %w", path, kerr)
+	}
+	return kp, nil
+}
+
+// createKeyfile generates a fresh keypair and persists it atomically enough
+// for concurrent starts: the file is created with O_EXCL (0600), so exactly
+// one process wins and every other caller observes os.ErrExist.
+func createKeyfile(path string) (*Keypair, error) {
 	kp, err := GenerateKeypair()
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(path, []byte(hex.EncodeToString(kp.Private)), 0o600); err != nil {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("noisework: create keyfile %s: %w", path, err)
+	}
+	if _, err := f.Write([]byte(hex.EncodeToString(kp.Private))); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("noisework: persist keypair %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
 		return nil, fmt.Errorf("noisework: persist keypair %s: %w", path, err)
 	}
 	return kp, nil
@@ -176,6 +227,12 @@ func ParsePublicKeyHex(s string) ([]byte, error) {
 // tolerance spans frames *within a rekey epoch*; a frame lagging one full
 // epoch behind cannot be recovered because epoch keys advance one-way (the
 // previous epoch's key material is gone once a newer epoch has been seen).
+//
+// A Session is NOT goroutine-safe: the cipher states, counters and epoch
+// bookkeeping carry no internal locking. Callers must serialize access (the
+// peer package does this under the peer mutex, the control package under its
+// write mutex); concurrent use of one Session from several goroutines can
+// reuse nonces and break the AEAD guarantees.
 type Session struct {
 	peerStatic     []byte
 	channelBinding []byte
@@ -226,6 +283,13 @@ func (s *Session) Encrypt(plaintext []byte) ([]byte, error) {
 // nonce's epoch and then seeks to the exact nonce, so frames may arrive
 // reordered or with gaps. A session whose handshake has not completed yet
 // returns an error.
+//
+// A rekey is applied only AFTER the frame has authenticated: Rekey is one-way,
+// so a spoofed datagram with a wild (but in-window) nonce must not be able to
+// advance the epoch keys and lock the receive direction until the next
+// re-handshake. Frames that cross an epoch boundary are therefore opened with
+// a throwaway cipher state first, and the live state only commits the advance
+// once the AEAD check passes.
 func (s *Session) DecryptAt(nonce uint64, ciphertext []byte) ([]byte, error) {
 	if s == nil || s.recv == nil {
 		return nil, errors.New("noisework: session not ready (handshake incomplete)")
@@ -233,15 +297,46 @@ func (s *Session) DecryptAt(nonce uint64, ciphertext []byte) ([]byte, error) {
 	if nonce > MaxNonce {
 		return nil, fmt.Errorf("noisework: decrypt nonce out of range: %w", noise.ErrMaxNonce)
 	}
-	if !s.rekeyRecvTo(nonce) {
-		return nil, fmt.Errorf("noisework: decrypt nonce %d demands too large a rekey jump", nonce)
+	ep := epochOf(nonce, s.rekeyEvery)
+	switch {
+	case ep == s.recvEpoch:
+		// Same epoch: a failed AEAD check mutates neither the key nor the
+		// nonce (both are set explicitly here), so the live state is safe.
+		s.recv.SetNonce(nonce)
+		pt, err := s.recv.Decrypt(nil, nil, ciphertext)
+		if err != nil {
+			return nil, fmt.Errorf("noisework: decrypt: %w", err)
+		}
+		return pt, nil
+	case ep < s.recvEpoch:
+		// The frame belongs to an epoch whose key material is already gone
+		// (epoch keys advance one-way). Reject without touching any state.
+		return nil, fmt.Errorf("noisework: decrypt nonce %d is behind the current rekey epoch", nonce)
+	default:
+		if ep-s.recvEpoch > maxEpochJump {
+			return nil, fmt.Errorf("noisework: decrypt nonce %d demands too large a rekey jump", nonce)
+		}
+		// Derive the candidate epoch key on a throwaway cipher state; the
+		// cipher suite is a stateless bundle of primitives, so a fresh one is
+		// equivalent to the session's.
+		cand := noise.UnsafeNewCipherState(newCipherSuite(), s.recv.UnsafeKey(), 0)
+		for i := s.recvEpoch; i < ep; i++ {
+			cand.Rekey()
+		}
+		cand.SetNonce(nonce)
+		pt, err := cand.Decrypt(nil, nil, ciphertext)
+		if err != nil {
+			return nil, fmt.Errorf("noisework: decrypt: %w", err)
+		}
+		// Authentication succeeded: commit the epoch advance to the live
+		// state and position its nonce past the accepted frame.
+		for s.recvEpoch < ep {
+			s.recv.Rekey()
+			s.recvEpoch++
+		}
+		s.recv.SetNonce(nonce + 1)
+		return pt, nil
 	}
-	s.recv.SetNonce(nonce)
-	pt, err := s.recv.Decrypt(nil, nil, ciphertext)
-	if err != nil {
-		return nil, fmt.Errorf("noisework: decrypt: %w", err)
-	}
-	return pt, nil
 }
 
 // Decrypt is the in-order convenience form of DecryptAt: it opens ciphertext
@@ -273,19 +368,6 @@ func (s *Session) rekeySendTo(nonce uint64) bool {
 		}
 		s.send.Rekey()
 		s.sendEpoch++
-	}
-	return true
-}
-
-// rekeyRecvTo mirrors rekeySendTo for the receive cipher state.
-func (s *Session) rekeyRecvTo(nonce uint64) bool {
-	ep := epochOf(nonce, s.rekeyEvery)
-	for s.recvEpoch < ep {
-		if ep-s.recvEpoch > maxEpochJump {
-			return false
-		}
-		s.recv.Rekey()
-		s.recvEpoch++
 	}
 	return true
 }
