@@ -174,7 +174,12 @@ func (p *Peer) SessionAge() time.Duration {
 func (p *Peer) DirectEndpoint() *net.UDPAddr {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.DirectEP
+	if p.DirectEP == nil {
+		return nil
+	}
+	cp := *p.DirectEP
+	cp.IP = append(net.IP(nil), p.DirectEP.IP...)
+	return &cp
 }
 
 // WaitEstablished blocks until the session is established or ctx is done.

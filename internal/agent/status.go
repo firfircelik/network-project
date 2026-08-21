@@ -93,12 +93,24 @@ func (a *Agent) Status() Status {
 // snapshot and blocks for the reply (or until ctx is done). The caller must
 // have registered first (see setup).
 func (a *Agent) QueryCoordinator(ctx context.Context) (*protocol.Message, error) {
+	a.queryMu.Lock()
+	defer a.queryMu.Unlock()
+
 	a.ctrlMu.Lock()
 	ctrl := a.ctrlConn
 	a.ctrlMu.Unlock()
 	if ctrl == nil {
 		return nil, errors.New("control session not established")
 	}
+	for {
+		select {
+		case <-a.queryCh:
+		default:
+			goto drained
+		}
+	}
+
+drained:
 	line, err := protocol.EncodeLine(protocol.Message{Type: protocol.TypeQuery})
 	if err != nil {
 		return nil, err
