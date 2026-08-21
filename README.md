@@ -33,8 +33,13 @@ localhost without root.
 - **NAT simulator** — `internal/nat` models full-cone, address-restricted and
   symmetric behaviors for reproducible local testing.
 - **Operations UX** — a one-shot `agent status` snapshot (peers, path, RTT,
-  rekey counters, coordinator registry) and a live `agent tui` dashboard, plus
-  `make lan-demo` for a VPS-free two-device check on the same Wi-Fi/LAN.
+  rekey counters, coordinator registry) with a machine-readable `--json`
+  variant (`--probe-peer` warms the tunnel so path/RTT are real), a live
+  `agent tui` dashboard, and `make lan-demo` for a VPS-free two-device check
+  on the same Wi-Fi/LAN.
+- **Ecosystem** — the JSON status feed is consumed by
+  [HomeNetIQ](https://github.com/firfircelik/homenetiq), which scores mesh
+  health (path, RTT, rekeys) in its self-hosted network dashboard.
 
 ## Quickstart
 
