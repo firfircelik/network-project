@@ -73,6 +73,7 @@ type Agent struct {
 	rttHist map[string][]time.Duration // most recent first, capped at rttHistoryDepth
 
 	queryCh chan *protocol.Message // TypeQueryResult deliveries from ctrlReaderLoop
+	queryMu sync.Mutex             // serializes QueryCoordinator calls
 }
 
 // rttHistoryDepth bounds the per-peer RTT history kept for dashboards.

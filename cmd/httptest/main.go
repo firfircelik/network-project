@@ -1,5 +1,5 @@
 // Command httptest is a self-contained real HTTPS file server used as the
-// transfer endpoint for wire-level loss measurements (scripts/httptest-check.sh).
+// transfer endpoint for wire-level loss measurements (scripts/retx-check.sh).
 //
 // It is deliberately dependency-free and "real":
 //   - binds to a kernel-chosen port when -addr ends in :0 (no fixed ports),
