@@ -1,5 +1,9 @@
 # meshlink
 
+[![CI](https://github.com/firfircelik/network-project/actions/workflows/ci.yml/badge.svg)](https://github.com/firfircelik/network-project/actions/workflows/ci.yml)
+![Go](https://img.shields.io/badge/go-1.26%2B-00ADD8?logo=go&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
+
 **🌐 Languages:** [English](README.md) · [Türkçe](README.tr.md) · [Français](README.fr.md) · [Italiano](README.it.md) · [Deutsch](README.de.md)
 
 Encrypted, NAT-traversing P2P mesh VPN written in Go. Agents talk over
@@ -158,9 +162,7 @@ analysis needs `tshark`). On a real interface the capture needs root:
 `sudo env RETX_IFACE=en0 RETX_TRANSFER='curl -sfS -o /dev/null https://host/a.bin' scripts/retx-check.sh`.
 
 CI runs `gofmt` → `go vet` → `go test -race ./...` → `make demo` on every
-push to `main`:
-
-[![CI](https://github.com/firfircelik/network-project/actions/workflows/ci.yml/badge.svg)](https://github.com/firfircelik/network-project/actions/workflows/ci.yml)
+push to `main`.
 
 ## Documentation
 
@@ -173,11 +175,3 @@ push to `main`:
 | [`docs/TUN.md`](docs/TUN.md) | TUN bridge — macOS, Linux, cross-machine |
 | [`docs/REALNET.md`](docs/REALNET.md) | real-internet verification recipe (VPS) |
 | [`docs/REVIEW.md`](docs/REVIEW.md) | code review log |
-
-## Status
-
-Phase 1 (CI, fuzz, config/log hygiene) and Phase 2 (replay window, rekey,
-nonce guards) are complete; Phase 3 (authenticated control plane, relay
-pinning + rate limits, handshake budgets) is complete; Phase 4 (TUN bridge)
-is implemented and documented — the remaining item is verification on the
-real internet (see `docs/REALNET.md`).
