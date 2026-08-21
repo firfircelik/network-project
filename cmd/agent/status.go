@@ -137,7 +137,7 @@ type registryJSON struct {
 type peerJSON struct {
 	ID           string    `json:"id"`
 	Established  bool      `json:"established"`
-	Path         string    `json:"path"` // none / direct / relay
+	Path         string    `json:"path"`                     // none / direct / relay
 	RTTMs        *float64  `json:"rtt_ms"`                   // null = not sampled yet
 	RTTHistoryMs []float64 `json:"rtt_history_ms,omitempty"` // newest first
 	Rekeys       uint64    `json:"rekeys"`
