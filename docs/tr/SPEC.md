@@ -87,8 +87,8 @@ Ajan → Coor:
 
 Coor → Ajan:
 ```json
-{"type":"hello","id":"a"}
 {"type":"peer_list","peers":[{"id":"a","pubkey":"<hex32>","endpoints":["..."]}]}
+{"type":"query_result","count":2,"total":5,"up":123,"peers":[...]}
 {"type":"error","msg":"..."}
 ```
 
@@ -107,6 +107,15 @@ Davranış: her kayıttan sonra koordinatör `peer_list`'i TÜM eşlere gönderi
   pencere (2048-bit bitmap) — yinelenen/bayat nonce reddi, kayıp toleransı.
 - Periyodik rekey: her `RekeyEvery` (varsayılan 2^20) mesajda anahtar dönüşü;
   `maxEpochJump` DoS kapağı; nonce tükenme koruması ve oturum yaş sınırı.
+  Alıcı tarafındaki rekey **kimlik doğrulamasına bağlıdır**: aday epoch anahtarı
+  tek kullanımlık bir cipher state üzerinde türetilir ve yalnızca çerçevenin AEAD
+  kontrolü geçtikten sonra uygulanır; böylece kimlik doğrulaması olmayan bir
+  datagram tek yönlü epoch anahtarlarını ilerletip alma yönünü kilitleyemez.
+- El sıkışma güvenilirliği: HS3 (yerleşik yeniden gönderimi olmayan tek el
+  sıkışma mesajı), yanıtlayıcı kimlik doğrulamalı bir DATA çerçevesiyle cevap
+  verene kadar inisiyatör tarafından yeniden gönderilir; yanıtlayıcı yarı-açıkken
+  gelen yinelenen HS1, el sıkışmayı sıfırlamak yerine önbellekteki HS2'yi yeniden
+  iletir ve bayat yarı-açık durum 10 sn'lik zaman aşımından sonra temizlenir.
 - Keepalive: 10 s sessizlikten sonra boş DATA çerçevesi (NAT eşlemesi + canlılık).
 
 ## 4. Paket API sözleşmeleri
@@ -149,7 +158,7 @@ func (s *Session) DecryptAt(nonce uint64, ciphertext []byte) ([]byte, error)  //
 func (s *Session) Decrypt(ciphertext []byte) ([]byte, error)    // kontrol kanalı: sıralı recv
 func (s *Session) PeerStatic() []byte
 func (s *Session) ChannelBinding() []byte
-func (s *Session) MaxPlaintextLen() int  // en büyük tek-datagram plaintext'i: 65507 (max IPv4 UDP) - 3 (frame hdr) - 16 (AEAD tag) = 65504; relay yolunda ayrıca relay başlığı kadar azalır
+func (s *Session) MaxPlaintextLen() int  // en büyük tek-datagram plaintext'i: 65507 (max IPv4 UDP) - 3 (frame hdr) - 8 (açık nonce) - 16 (AEAD tag) = 65480; relay yolunda ayrıca relay başlığı kadar azalır
 
 type Initiator struct{}
 func NewInitiator(myStatic *Keypair, peerStatic []byte, prologue []byte) (*Initiator, error)
@@ -270,15 +279,21 @@ type Message struct {                    // tek struct, Type string
     Endpoints []string `json:"endpoints,omitempty"`
     Peers     []PeerInfo `json:"peers,omitempty"`
     Msg       string `json:"msg,omitempty"`
+    Count     int   `json:"count,omitempty"` // yalnızca query_result
+    Total     int   `json:"total,omitempty"` // yalnızca query_result
+    Up        int64 `json:"up,omitempty"`    // yalnızca query_result
 }
 type PeerInfo struct {
     ID        string   `json:"id"`
     PubKey    string   `json:"pubkey"`
     Endpoints []string `json:"endpoints"`
 }
-const ( TypeRegister="register"; TypeHello="hello"; TypePeerList="peer_list"; TypeError="error" )
+const ( TypeRegister="register"; TypePeerList="peer_list"; TypeQuery="query"; TypeQueryResult="query_result"; TypeError="error" )
+const MaxControlLine = 64 << 10          // tek satır kontrol mesajı tavanı (bellek DoS kapağı)
+var ErrControlLineTooLong                // MaxControlLine aşan satır
 func EncodeLine(v any) ([]byte, error)            // JSON + "\n"
 func DecodeLine(b []byte) (*Message, error)
+func ReadLine(r *bufio.Reader) ([]byte, error)    // satırı biriktirmeden okur; uzun satırda ErrControlLineTooLong
 ```
 Test: register/peer_list gidiş-dönüşü.
 

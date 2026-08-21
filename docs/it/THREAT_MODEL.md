@@ -48,6 +48,16 @@ Beni:
 - **Replay:** ritrasmissione di testo cifrato DATA registrato. La finestra scorrevole
   stile WireGuard (2048) sul ricevitore rifiuta nonce vecchi e duplicati
   → **mitigata** (Fase 2).
+- **DoS sullo stato di rekey:** un datagramma falsificato con un nonce selvaggio che
+  fa avanzare le chiavi di epoca a senso unico prima dell'autenticazione, bloccando la
+  direzione di ricezione fino al prossimo re-handshake. `DecryptAt` ora deriva la chiave
+  di epoca candidata su uno stato di cifratura usa-e-getta e applica il rekey solo dopo
+  il superamento del controllo AEAD → **mitigata**.
+- **DoS da handshake semi-aperto:** un HS3 perso lasciava il risponditore semi-aperto
+  fino alla durata della sessione di 24 h. L'iniziatore ora riemette HS3 finché il
+  risponditore non risponde con dati autenticati, gli HS1 duplicati ritrasmettono l'HS2
+  in cache invece di azzerare il risponditore e lo stato semi-aperto obsoleto viene
+  ripulito dopo un timeout di 10 s → **mitigata**.
 - **DoS UDP/riflessione:** amplificazione rivendicando un nome presso il relay;
   pacchetti con indirizzi sorgente falsificati. Il pinning nome→indirizzo + i limiti
   pps/byte per sorgente + la quota per nome sono attivi → **mitigata** (Fase 3).
@@ -102,7 +112,7 @@ Beni:
 - Verifica del txid STUN.
 - Limiti di dimensione nella comunicazione (`maxMsgLen` di controllo, envelope
   relay/nat), controllo di validità dei frame.
-- Contratto sulla dimensione dei datagrammi (tetto plaintext 65507-3-16, il percorso
+- Contratto sulla dimensione dei datagrammi (tetto plaintext 65507-3-8-16 = 65480, il percorso
   relay è ulteriormente ristretto).
 - Write deadline per le broadcast del coordinator; letture di controllo con limite.
 - Unit test puliti con `-race`; fuzzer dei parser; demo end-to-end; workflow CI.

@@ -50,8 +50,10 @@ func configFlags(fs *flag.FlagSet) *agent.Config {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
-  meshlink agent up   --name <id> ...      run daemon
-  meshlink agent ping --name <id> --peer <id> [--count N] ...`)
+  meshlink agent up     --name <id> ...      run daemon
+  meshlink agent ping   --name <id> --peer <id> [--count N] ...
+  meshlink agent status --name <id> ...      print one-shot status snapshot and exit
+  meshlink agent tui    --name <id> ...      live terminal dashboard`)
 }
 
 func main() {
@@ -61,23 +63,27 @@ func main() {
 	}
 	var run func() error
 	switch os.Args[1] {
-	case "up", "ping":
+	case "up", "ping", "status", "tui":
 		fs := flag.NewFlagSet("agent "+os.Args[1], flag.ExitOnError)
 		cfg := configFlags(fs)
+		mode := os.Args[1]
+		if mode == "tui" {
+			// slog output would corrupt the terminal dashboard; keep logs on stderr.
+			cfg.LogWriter = os.Stderr
+		}
 		var peerID string
 		var count int
 		var interval time.Duration
-		if os.Args[1] == "ping" {
+		if mode == "ping" {
 			fs.StringVar(&peerID, "peer", "", "peer to ping")
 			fs.IntVar(&count, "count", 3, "number of pings")
 			fs.DurationVar(&interval, "interval", 0, "delay between pings")
 		}
 		_ = fs.Parse(os.Args[2:])
-		mode := os.Args[1]
 		if cfg.Name == "" || cfg.Keyfile == "" || cfg.CoordKey == "" {
 			log.Fatal("--name, --keyfile and --coord-pubkey are required")
 		}
-		if mode == "ping" && (cfg.TunName != "" || cfg.TunIP != "" || len(cfg.TunPeers) > 0) {
+		if mode != "up" && (cfg.TunName != "" || cfg.TunIP != "" || len(cfg.TunPeers) > 0) {
 			log.Fatal("TUN flags (--tun, --tun-ip, --tun-peer) are only valid in 'up' mode")
 		}
 		a, err := agent.New(*cfg)
@@ -87,8 +93,13 @@ func main() {
 		run = func() error {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 			defer cancel()
-			if mode == "up" {
+			switch mode {
+			case "up":
 				return a.Run(ctx)
+			case "status":
+				return runStatus(ctx, a)
+			case "tui":
+				return runTUI(ctx, a)
 			}
 			pctx, pcancel := context.WithTimeout(ctx, 30*time.Second)
 			defer pcancel()

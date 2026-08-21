@@ -58,6 +58,45 @@ func TestDecodeEmpty(t *testing.T) {
 	}
 }
 
+func TestQueryResultRoundtrip(t *testing.T) {
+	line, err := EncodeLine(Message{
+		Type:  TypeQueryResult,
+		Count: 2,
+		Total: 7,
+		Up:    42,
+		Peers: []PeerInfo{
+			{ID: "a", PubKey: "k1", Endpoints: []string{"127.0.0.1:1"}},
+			{ID: "b", PubKey: "k2", Endpoints: []string{"127.0.0.1:2"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	msg, err := DecodeLine(line)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if msg.Type != TypeQueryResult || msg.Count != 2 || msg.Total != 7 || msg.Up != 42 {
+		t.Fatalf("snapshot fields mismatch: %+v", msg)
+	}
+	if len(msg.Peers) != 2 || msg.Peers[0].ID != "a" {
+		t.Fatalf("peers mismatch: %+v", msg.Peers)
+	}
+	// Query messages must omit the snapshot fields (omitempty) so a query is
+	// as small as a register.
+	qline, err := EncodeLine(Message{Type: TypeQuery})
+	if err != nil {
+		t.Fatalf("encode query: %v", err)
+	}
+	qmsg, err := DecodeLine(qline)
+	if err != nil {
+		t.Fatalf("decode query: %v", err)
+	}
+	if qmsg.Type != TypeQuery || qmsg.Count != 0 || qmsg.Total != 0 || qmsg.Up != 0 {
+		t.Fatalf("query decode mismatch: %+v", qmsg)
+	}
+}
+
 func TestTrailingNewlineTolerated(t *testing.T) {
 	msg, err := DecodeLine([]byte(`{"type":"register","id":"x","pubkey":"abc"}` + "\n"))
 	if err != nil {

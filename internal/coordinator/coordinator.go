@@ -67,7 +67,9 @@ type Server struct {
 	registrations map[string]*Registration
 	clients       map[net.Conn]string        // conn -> peer ID ("" when not registered)
 	ctrlConns     map[net.Conn]*control.Conn // conn -> encrypted control session
+	totalRegs     int                        // registrations served since start
 
+	started  time.Time
 	ctrlLn   net.Listener
 	stunConn *net.UDPConn
 	closed   chan struct{}
@@ -90,6 +92,7 @@ func New(cfg Config) (*Server, error) {
 		registrations: make(map[string]*Registration),
 		clients:       make(map[net.Conn]string),
 		ctrlConns:     make(map[net.Conn]*control.Conn),
+		started:       time.Now(),
 		closed:        make(chan struct{}),
 	}
 	ln, err := net.Listen("tcp", cfg.CtrlAddr)
@@ -292,7 +295,22 @@ func (s *Server) handleClient(ctx context.Context, conn net.Conn) {
 		if err != nil || msg == nil {
 			continue
 		}
-		if msg.Type != protocol.TypeRegister {
+		if msg.Type != protocol.TypeRegister && msg.Type != protocol.TypeQuery {
+			continue
+		}
+		// TypeQuery is answered from the current registry snapshot without
+		// touching the caller's registration state.
+		if msg.Type == protocol.TypeQuery {
+			line, err := protocol.EncodeLine(s.registrySnapshot())
+			if err != nil {
+				continue
+			}
+			s.mu.RLock()
+			ctrl := s.ctrlConns[conn]
+			s.mu.RUnlock()
+			if ctrl != nil {
+				_ = ctrl.WriteMsg(line)
+			}
 			continue
 		}
 		if err := s.validateRegistration(msg); err != nil {
@@ -328,6 +346,7 @@ func (s *Server) handleClient(ctx context.Context, conn net.Conn) {
 			Owner:     conn,
 		}
 		s.clients[conn] = msg.ID
+		s.totalRegs++
 		// Broadcast the full current peer list to everybody (including sender).
 		peers := make([]protocol.PeerInfo, 0, len(s.registrations))
 		for _, r := range s.registrations {
@@ -346,6 +365,29 @@ func (s *Server) handleClient(ctx context.Context, conn net.Conn) {
 			return
 		default:
 		}
+	}
+}
+
+// registrySnapshot builds the TypeQueryResult answer: the current peer list
+// plus registry counters. Bounded by maxRegistrations just like a broadcast
+// peer_list, so a query result stays far below the control-message ceiling.
+func (s *Server) registrySnapshot() protocol.Message {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	peers := make([]protocol.PeerInfo, 0, len(s.registrations))
+	for _, r := range s.registrations {
+		peers = append(peers, protocol.PeerInfo{
+			ID:        r.ID,
+			PubKey:    r.PubKey,
+			Endpoints: r.Endpoints,
+		})
+	}
+	return protocol.Message{
+		Type:  protocol.TypeQueryResult,
+		Count: len(s.registrations),
+		Total: s.totalRegs,
+		Up:    int64(time.Since(s.started) / time.Second),
+		Peers: peers,
 	}
 }
 

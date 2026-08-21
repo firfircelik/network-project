@@ -54,28 +54,40 @@ func (r *Router) HasRoute(dst netip.Addr) bool {
 // RoutePacket validates pkt as an IPv4 datagram, looks up its destination in
 // the route table and forwards the datagram through the owning peer's session.
 // It reports whether the packet was accepted for delivery and updates the
-// packet counters.
+// packet counters. The (potentially blocking) sink send happens OUTSIDE the
+// route-table lock so one slow peer cannot serialize TUN egress for all
+// peers; the counters are still guarded by the lock.
 func (r *Router) RoutePacket(pkt []byte) bool {
 	_, dst, ok := parseIPv4(pkt)
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	if !ok {
 		// Malformed/truncated datagrams are not counted as offered traffic;
 		// they are noise and only bump the drop counter.
+		r.mu.Lock()
 		r.PktsDropped++
+		r.mu.Unlock()
 		return false
 	}
-	r.PktsIn++
-	sink, ok := r.routes[dst]
-	if !ok {
+	r.mu.RLock()
+	sink, found := r.routes[dst]
+	r.mu.RUnlock()
+	if !found {
+		r.mu.Lock()
+		r.PktsIn++
 		r.PktsDropped++
+		r.mu.Unlock()
 		return false
 	}
 	if err := sink.Send(pkt); err != nil {
+		r.mu.Lock()
+		r.PktsIn++
 		r.PktsDropped++
+		r.mu.Unlock()
 		return false
 	}
+	r.mu.Lock()
+	r.PktsIn++
 	r.PktsRouted++
+	r.mu.Unlock()
 	return true
 }
 

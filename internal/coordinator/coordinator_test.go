@@ -304,3 +304,72 @@ func TestSTUNEndpoint(t *testing.T) {
 		t.Fatal("expected no response to garbage")
 	}
 }
+
+func TestQueryRegistrySnapshot(t *testing.T) {
+	s, ctrlAddr, _ := startServer(t)
+
+	kpA := mustKey(t)
+	kpB := mustKey(t)
+	connA := connect(t, s, ctrlAddr, kpA)
+	connB := connect(t, s, ctrlAddr, kpB)
+
+	connA.send(protocol.Message{
+		Type: protocol.TypeRegister, ID: "a", PubKey: kpA.PublicHex(),
+		Endpoints: []string{"127.0.0.1:19301"},
+	})
+	if la := connA.recv(t); la.Type != protocol.TypePeerList {
+		t.Fatalf("A expected peer_list, got %+v", la)
+	}
+	connB.send(protocol.Message{
+		Type: protocol.TypeRegister, ID: "b", PubKey: kpB.PublicHex(),
+		Endpoints: []string{"127.0.0.1:19302"},
+	})
+	if lb := connB.recv(t); lb.Type != protocol.TypePeerList {
+		t.Fatalf("B expected peer_list, got %+v", lb)
+	}
+
+	// A third authenticated connection queries the registry with no register:
+	// it must receive a bounded snapshot, not a broadcast.
+	kpC := mustKey(t)
+	connC := connect(t, s, ctrlAddr, kpC)
+	connC.send(protocol.Message{Type: protocol.TypeQuery})
+	q := connC.recv(t)
+	if q.Type != protocol.TypeQueryResult {
+		t.Fatalf("expected TypeQueryResult, got %+v", q)
+	}
+	if q.Count != 2 {
+		t.Fatalf("Count = %d, want 2", q.Count)
+	}
+	if q.Total < 2 {
+		t.Fatalf("Total = %d, want >= 2 (each registration counted)", q.Total)
+	}
+	if q.Up < 0 {
+		t.Fatalf("Up = %d, want >= 0", q.Up)
+	}
+	got := map[string]bool{}
+	for _, p := range q.Peers {
+		got[p.ID] = true
+	}
+	if !got["a"] || !got["b"] {
+		t.Fatalf("query result missing peers: %+v", q.Peers)
+	}
+
+	// Disconnect A, re-query: the snapshot must shrink but the total count
+	// stays monotonic.
+	_ = connA.ctrl.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		connC.send(protocol.Message{Type: protocol.TypeQuery})
+		q2 := connC.recv(t)
+		if q2.Count == 1 && q2.Total == 2 {
+			if q2.Peers[0].ID != "b" {
+				t.Fatalf("only 'b' should remain, got %+v", q2.Peers)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("query after disconnect: Count=%d Total=%d, want 1/2", q2.Count, q2.Total)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

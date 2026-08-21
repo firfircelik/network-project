@@ -50,6 +50,16 @@ Werte (Assets):
 - **Replay:** erneutes Senden aufgezeichneter DATA-Ciphertexte. Das
   WireGuard-artige Schiebefenster (2048) beim Empfänger lehnt alte Nonces und
   Duplikate ab → **entschärft** (Phase 2).
+- **Rekey-Zustands-DoS:** ein gefälschtes Datagramm mit einer wilden Nonce,
+  das die Einweg-Epochenschlüssel vor der Authentifizierung vorschiebt und die
+  Empfangsrichtung bis zum nächsten Re-Handshake sperrt. `DecryptAt` leitet den
+  Epochenschlüssel-Kandidaten jetzt auf einem Wegwerf-Cipher-State ab und
+  übernimmt den Rekey erst nach bestandener AEAD-Prüfung → **entschärft**.
+- **Halboffener-Handshake-DoS:** ein verlorenes HS3 ließ den Responder bis zur
+  24-h-Sitzungslaufzeit halboffen. Der Initiator sendet HS3 jetzt erneut, bis
+  der Responder mit authentifizierten Daten antwortet; doppelte HS1 senden das
+  gecachte HS2 erneut statt den Responder zurückzusetzen, und veralteter
+  halboffener Zustand wird nach 10 s Timeout geräumt → **entschärft**.
 - **UDP-DoS/Reflexion:** Amplifikation durch Beanspruchen eines Namens beim
   Relay; Pakete mit gefälschten Quelladressen. Name→Adresse-Pinning +
   PPS/Byte-Limits pro Quelle + Kontingent pro Name sind aktiv →
@@ -110,7 +120,7 @@ Werte (Assets):
 - STUN-Txid-Verifikation.
 - Größenlimits in der Kommunikation (Kontrolle `maxMsgLen`,
   Relay/NAT-Umschlag), Prüfung der Frame-Gültigkeit.
-- Datagramm-Größenvertrag (65507-3-16 Klartext-Obergrenze, der Relay-Pfad ist
+- Datagramm-Größenvertrag (65507-3-8-16 = 65480 Klartext-Obergrenze, der Relay-Pfad ist
   zusätzlich verengt).
 - Schreib-Deadline für Koordinatoren-Broadcasts; begrenzte Kontroll-Reads.
 - `-race`-saubere Unit-Tests; Parser-Fuzzer; End-to-End-Demo; CI-Workflow.

@@ -4,6 +4,7 @@
 package peer
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -37,6 +38,13 @@ const hs1MaxPerSec = 8
 // message count (SPEC §3 "session age limit").
 const sessionMaxAge = 24 * time.Hour
 
+// responderHandshakeTimeout bounds how long a half-open responder state
+// (HS1 accepted, HS2 sent, HS3 never received) is kept: a duplicate HS1 older
+// than this restarts the handshake instead of retransmitting HS2, and the Run
+// loop clears such stale state entirely, so a vanished initiator cannot pin
+// handshake memory forever.
+const responderHandshakeTimeout = 10 * time.Second
+
 // Transport abstracts how the owning agent emits datagrams.
 type Transport interface {
 	// SendDirect sends a framed datagram to dst, egressing through the
@@ -64,6 +72,12 @@ type Peer struct {
 	responder   *noisework.Responder
 	initiatorHS *noisework.Initiator
 	hs1Frame    []byte // cached TypeHS1 frame; resent verbatim on HS1 retries
+	hs1Msg      []byte // HS1 payload the responder accepted (duplicate detection)
+	hs2Frame    []byte // cached TypeHS2 frame; resent verbatim on HS1 duplicates
+	hs2SentAt   time.Time
+	hs3Frame    []byte // cached TypeHS3 frame; resent until the peer answers
+	hs3Pending  bool   // HS3 sent but no authenticated data from the peer yet
+	lastHS3     time.Time
 	sess        *noisework.Session
 	replay      *replayWindow // DATA nonce acceptance gate for the current session
 	established bool
@@ -76,6 +90,8 @@ type Peer struct {
 
 	hsBurstStart time.Time // G5: responder handshake CPU budget window
 	hsBurstCount int
+
+	rekeyCount uint64 // sessions replaced while another was live (rotation)
 
 	doneOnce sync.Once
 	done     chan struct{}
@@ -132,6 +148,33 @@ func (p *Peer) Path() disco.Path {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.path
+}
+
+// RekeyCount reports how many times a live session was replaced by a new one
+// since this peer was created (age/nonce-based key rotation).
+func (p *Peer) RekeyCount() uint64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.rekeyCount
+}
+
+// SessionAge reports how long the current session has been established
+// (0 when no session is installed).
+func (p *Peer) SessionAge() time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.sess == nil {
+		return 0
+	}
+	return p.sess.Age()
+}
+
+// DirectEndpoint returns the peer's current advertised direct endpoint, or nil
+// when none is known.
+func (p *Peer) DirectEndpoint() *net.UDPAddr {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.DirectEP
 }
 
 // WaitEstablished blocks until the session is established or ctx is done.
@@ -206,6 +249,19 @@ func (p *Peer) Run(ctx context.Context) {
 			lastSent := p.lastSent
 			phaseStart := p.phaseStart
 			sessSince := p.sessSince
+			directEP := p.DirectEP
+			hs3Pending := p.hs3Pending
+			lastHS3 := p.lastHS3
+			// A half-open responder state (HS2 sent, HS3 never received) whose
+			// initiator vanished: free it so its memory is not pinned forever
+			// and a later fresh HS1 starts from a clean state.
+			hs2Stale := p.responder != nil && p.hs2Frame != nil &&
+				time.Since(p.hs2SentAt) > responderHandshakeTimeout
+			if hs2Stale {
+				p.responder = nil
+				p.hs1Msg = nil
+				p.hs2Frame = nil
+			}
 			p.mu.Unlock()
 
 			if established && time.Since(sessSince) > sessionMaxAge {
@@ -213,6 +269,14 @@ func (p *Peer) Run(ctx context.Context) {
 				// re-establish the session from scratch.
 				p.forceRehandshake()
 				continue
+			}
+
+			// HS3 is the only handshake message without a built-in retry; a
+			// lost HS3 leaves the responder half-open while the initiator is
+			// already established. Keep re-emitting it until the responder
+			// proves it holds the session keys (onData clears hs3Pending).
+			if established && hs3Pending && time.Since(lastHS3) > disco.HS1ResendInterval {
+				p.resendHS3()
 			}
 
 			switch {
@@ -223,7 +287,7 @@ func (p *Peer) Run(ctx context.Context) {
 				if time.Since(phaseStart) > p.attemptFor(mode) {
 					p.switchMode(mode)
 				}
-			case path == disco.PathRelay && p.initiator && p.DirectEP != nil:
+			case path == disco.PathRelay && p.initiator && directEP != nil:
 				if mode == disco.PathDirect {
 					// A roaming probe is in flight: give it a full direct
 					// attempt window, then revert to the relay instead of
@@ -311,21 +375,29 @@ func (p *Peer) switchMode(current disco.Path) {
 	case disco.PathDirect:
 		if p.send.RelayAddr() != nil {
 			p.mode = disco.PathRelay
-			p.initiatorHS = nil
-			p.hs1Frame = nil
-			p.responder = nil
+			p.resetHandshakeLocked()
 			p.phaseStart = time.Now()
 		}
 	case disco.PathRelay:
 		if p.DirectEP != nil {
 			p.mode = disco.PathDirect
-			p.initiatorHS = nil
-			p.hs1Frame = nil
-			p.responder = nil
+			p.resetHandshakeLocked()
 			p.phaseStart = time.Now()
 		}
 	}
 	p.mu.Unlock()
+}
+
+// resetHandshakeLocked clears all in-flight handshake state on both roles.
+// Callers must hold p.mu.
+func (p *Peer) resetHandshakeLocked() {
+	p.initiatorHS = nil
+	p.hs1Frame = nil
+	p.hs3Frame = nil
+	p.hs3Pending = false
+	p.responder = nil
+	p.hs1Msg = nil
+	p.hs2Frame = nil
 }
 
 // retryDirect starts a fresh direct handshake attempt while established on
@@ -343,13 +415,18 @@ func (p *Peer) retryDirect() {
 		return
 	}
 	p.initiatorHS = hs
+	p.hs1Frame = record.Frame(record.TypeHS1, msg1)
+	p.hs3Frame = nil
+	p.hs3Pending = false
 	p.responder = nil
+	p.hs1Msg = nil
+	p.hs2Frame = nil
 	p.mode = disco.PathDirect
 	p.lastHS1 = time.Now()
 	p.phaseStart = time.Now()
+	dst := p.DirectEP
 	p.mu.Unlock()
-	frame := record.Frame(record.TypeHS1, msg1)
-	_ = p.send.SendDirect(p.DirectEP, frame)
+	_ = p.send.SendDirect(dst, record.Frame(record.TypeHS1, msg1))
 }
 
 // abandonRoaming reverts a relay→direct roaming attempt back to the relay path
@@ -362,31 +439,27 @@ func (p *Peer) abandonRoaming() {
 		return
 	}
 	p.mode = disco.PathRelay
-	p.initiatorHS = nil
-	p.hs1Frame = nil
-	p.responder = nil
+	p.resetHandshakeLocked()
 	p.phaseStart = time.Now()
 	p.mu.Unlock()
 }
 
 // forceRehandshake tears down the current key material so Run re-establishes
-// the session (age-based rotation; keepalive/nonce-exhaustion recovery).
+// the session (age-based rotation).
 func (p *Peer) forceRehandshake() {
 	p.mu.Lock()
 	p.sess = nil
 	p.replay = newReplayWindow(replayWindowSizeBits)
 	p.established = false
-	p.initiatorHS = nil
-	p.hs1Frame = nil
-	p.responder = nil
+	p.resetHandshakeLocked()
 	p.phaseStart = time.Now()
 	p.mu.Unlock()
 }
 
 // SetDirectEP updates the advertised direct endpoint, e.g. when the control
-// plane reports a changed public address after a NAT remap. Lock-held reads in
-// Run and receiveLoop observe the pointer under p.mu; DirectEP itself is read
-// from locked contexts, so replacing the pointer value here is safe.
+// plane reports a changed public address after a NAT remap. Every read of
+// DirectEP happens under p.mu (Run, punch, retryDirect, onHS1/onHS2,
+// sendEncryptedLocked), so replacing the pointer here is race-free.
 func (p *Peer) SetDirectEP(ep *net.UDPAddr) {
 	p.mu.Lock()
 	p.DirectEP = ep
@@ -447,10 +520,30 @@ func (p *Peer) onHS1(msg []byte, path disco.Path) {
 		p.mu.Unlock()
 		return
 	}
-	alreadyEstablished := p.established
-	if alreadyEstablished && p.path != disco.PathRelay {
+	if p.established && p.path != disco.PathRelay {
 		p.mu.Unlock()
 		return // refuse re-handshake over an already-established direct session
+	}
+	// Half-open responder (HS2 sent, waiting for HS3): a duplicate of the HS1
+	// we already accepted must NOT reset the responder state — doing so would
+	// orphan the initiator's in-flight HS3 and leave the session half-open.
+	// Retransmit the cached HS2 instead (cheap, no Noise CPU). A *different*
+	// HS1 only restarts the handshake once the current attempt has timed out.
+	if p.responder != nil && p.hs2Frame != nil {
+		if bytes.Equal(msg, p.hs1Msg) {
+			frame := p.hs2Frame
+			dst := p.DirectEP
+			p.mu.Unlock()
+			_ = p.sendFrame(path, dst, frame)
+			return
+		}
+		if now.Sub(p.hs2SentAt) < responderHandshakeTimeout {
+			p.mu.Unlock()
+			return
+		}
+		p.responder = nil
+		p.hs1Msg = nil
+		p.hs2Frame = nil
 	}
 	if p.responder == nil {
 		r, err := noisework.NewResponder(p.myKp, []byte(Prologue))
@@ -467,12 +560,16 @@ func (p *Peer) onHS1(msg []byte, path disco.Path) {
 	}
 	msg2, err := p.responder.Message2()
 	if err != nil {
+		p.responder = nil
 		p.mu.Unlock()
 		return
 	}
+	p.hs1Msg = append([]byte(nil), msg...)
+	p.hs2Frame = record.Frame(record.TypeHS2, msg2)
+	p.hs2SentAt = now
 	p.mode = path
-	p.phaseStart = time.Now()
-	frame := record.Frame(record.TypeHS2, msg2)
+	p.phaseStart = now
+	frame := p.hs2Frame
 	dst := p.DirectEP
 	p.mu.Unlock()
 	_ = p.sendFrame(path, dst, frame)
@@ -499,10 +596,33 @@ func (p *Peer) onHS2(msg []byte, path disco.Path) {
 		return
 	}
 	p.setSessionLocked(sess, path)
-	frame := record.Frame(record.TypeHS3, msg3)
+	// HS3 is the only handshake message without a built-in retry: cache it so
+	// Run can re-emit it until the responder proves it holds the session keys
+	// (an authenticated DATA frame clears hs3Pending). Without this, one lost
+	// HS3 leaves the responder half-open until the 24 h age rotation.
+	p.hs3Frame = record.Frame(record.TypeHS3, msg3)
+	p.hs3Pending = true
+	p.lastHS3 = time.Now()
+	frame := p.hs3Frame
 	dst := p.DirectEP
 	p.mu.Unlock()
 	_ = p.sendFrame(path, dst, frame)
+}
+
+// resendHS3 re-emits the cached HS3 while the responder has not yet
+// acknowledged the session with authenticated data.
+func (p *Peer) resendHS3() {
+	p.mu.Lock()
+	if !p.hs3Pending || p.hs3Frame == nil {
+		p.mu.Unlock()
+		return
+	}
+	p.lastHS3 = time.Now()
+	frame := p.hs3Frame
+	mode := p.mode
+	dst := p.DirectEP
+	p.mu.Unlock()
+	_ = p.sendFrame(mode, dst, frame)
 }
 
 func (p *Peer) onHS3(msg []byte, path disco.Path) {
@@ -518,6 +638,11 @@ func (p *Peer) onHS3(msg []byte, path disco.Path) {
 		return
 	}
 	p.setSessionLocked(sess, path)
+	// The handshake completed from the responder side: drop the half-open
+	// state so a stray duplicate HS1 cannot disturb the live session.
+	p.responder = nil
+	p.hs1Msg = nil
+	p.hs2Frame = nil
 	p.mu.Unlock()
 }
 
@@ -532,6 +657,10 @@ func (p *Peer) setSessionLocked(sess *noisework.Session, path disco.Path) {
 	// A re-handshake installs a brand-new session whose counters restart from
 	// zero, so the replay window must never carry over state from the old key.
 	if p.sess != sess {
+		if p.sess != nil {
+			// Replacing a live session = a key rotation (age/nonce based).
+			p.rekeyCount++
+		}
 		p.sess = sess
 		p.replay = newReplayWindow(replayWindowSizeBits)
 	}
@@ -571,6 +700,9 @@ func (p *Peer) onData(payload []byte) {
 		return
 	}
 	p.replay.Commit(nonce)
+	// An authenticated DATA frame proves the peer holds the session keys, so
+	// the initiator can stop re-emitting HS3 (see onHS2/resendHS3).
+	p.hs3Pending = false
 	if len(plain) > 0 {
 		// Non-blocking send while holding the lock: the channel can only be
 		// closed under the same lock, so a concurrent Run-defer close cannot
@@ -582,11 +714,14 @@ func (p *Peer) onData(payload []byte) {
 	}
 }
 
-// sendEncryptedLocked encrypts and emits payload on the established path.
-func (p *Peer) sendEncryptedLocked(payload []byte) error {
+// encryptLocked encrypts payload on the established session and returns the
+// complete DATA frame. Callers must hold p.mu (the Noise send state and the
+// nonce counter advance under it); the network write itself happens outside
+// the lock so a slow send cannot serialize the peer's frame handling.
+func (p *Peer) encryptLocked(payload []byte) (frame []byte, mode disco.Path, dst *net.UDPAddr, err error) {
 	sess := p.sess
 	if sess == nil {
-		return errors.New("no session")
+		return nil, 0, nil, errors.New("no session")
 	}
 	// The Noise+frame bound already fits a single UDP datagram on the direct
 	// path; relayed frames additionally carry the relay header, so the plaintext
@@ -596,25 +731,28 @@ func (p *Peer) sendEncryptedLocked(payload []byte) error {
 		limit -= relay.MaxHeaderLen
 	}
 	if len(payload) > limit {
-		return fmt.Errorf("payload too large for %s frame (%d > %d bytes)", p.path, len(payload), limit)
+		return nil, 0, nil, fmt.Errorf("payload too large for %s frame (%d > %d bytes)", p.path, len(payload), limit)
 	}
 	nonce, cipher, err := sess.Send(payload)
 	if err != nil {
-		return err
+		return nil, 0, nil, err
 	}
 	wire := make([]byte, nonceWireLen, nonceWireLen+len(cipher))
 	binary.BigEndian.PutUint64(wire, nonce)
 	wire = append(wire, cipher...)
-	frame := record.Frame(record.TypeData, wire)
 	p.lastSent = time.Now()
-	return p.sendFrame(p.path, p.DirectEP, frame)
+	return record.Frame(record.TypeData, wire), p.path, p.DirectEP, nil
 }
 
 // Send encrypts and sends payload over the established session.
 func (p *Peer) Send(payload []byte) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.sendEncryptedLocked(payload)
+	frame, mode, dst, err := p.encryptLocked(payload)
+	p.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return p.sendFrame(mode, dst, frame)
 }
 
 // SendJSON marshals v and sends it over the session.

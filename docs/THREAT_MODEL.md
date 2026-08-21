@@ -47,6 +47,16 @@ Assets:
 - **Replay:** re-transmission of recorded DATA ciphertext. The WireGuard-style
   sliding window (2048) at the receiver rejects old nonces and duplicates
   → **mitigated** (Phase 2).
+- **Rekey-state DoS:** a spoofed datagram with a wild nonce used to advance
+  the one-way epoch keys before authentication, locking the receive direction
+  until the next re-handshake. `DecryptAt` now derives the candidate epoch key
+  on a throwaway cipher state and commits the rekey only after the AEAD check
+  passes → **mitigated**.
+- **Half-open handshake DoS:** a lost HS3 used to leave the responder
+  half-open for up to the 24 h session age. The initiator now re-emits HS3
+  until the responder answers with authenticated data, duplicate HS1s
+  retransmit the cached HS2 instead of resetting the responder, and stale
+  half-open state is cleared after a 10 s timeout → **mitigated**.
 - **UDP DoS/reflection:** amplification by claiming a name to the relay; packets
   with spoofed source addresses. Name→address pinning + per-source pps/byte
   limits + per-name quota are active → **mitigated** (Phase 3).
@@ -95,8 +105,8 @@ Assets:
 - STUN txid verification.
 - Size limits in communication (control `maxMsgLen`, relay/nat envelope), frame
   validity checking.
-- Datagram size contract (65507-3-16 plaintext ceiling, the relay path is
-  additionally tightened).
+- Datagram size contract (65507-3-8-16 = 65480 plaintext ceiling, the relay path
+  is additionally tightened).
 - Coordinator broadcast write deadline; bounded control reads.
 - `-race`-clean unit tests; parser fuzzers; end-to-end demo; CI workflow.
 
